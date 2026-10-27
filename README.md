@@ -36,7 +36,7 @@ A classificação automatizada de espécies vegetais constitui um dos problemas 
 - **Altíssima Variabilidade Intra-Classe:** Indivíduos da mesma espécie vegetal apresentam disparidades fenotípicas expressivas provocadas pela idade da planta, dessecação natural das pétalas, estresse hídrico e variações no ângulo solar.
 - **Minúscula Variabilidade Inter-Classes:** Espécies biologicamente irmãs (como táxons congenéricos das famílias *Asteraceae*, *Primulaceae* ou *Orchidaceae*) compartilham padrões de pigmentação e geometrias de corola quase indistinguíveis a olho nu.
 
-Este projeto baseia-se na fundamentação teórica de engenharia de dados visuais exposta no documento [`analise_computacional_dados_visuais-v3.pdf`](analise_computacional_dados_visuais-v3.pdf), operando sobre o consagrado benchmark **Oxford 102 Flowers Dataset** ($8.189$ imagens distribuídas em $102$ classes botânicas).
+Este projeto baseia-se na fundamentação teórica de engenharia de dados visuais exposta no documento [`analise_computacional_dados_visuais-v3.pdf`](analise_computacional_dados_visuais-v3.pdf), operando sobre o benchmark **Oxford 102 Flowers Dataset** ($8.189$ imagens distribuídas em $102$ classes botânicas).
 
 ---
 
