@@ -7,7 +7,7 @@
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-1.3%2B-F7931E.svg?logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
 [![Status](https://img.shields.io/badge/Status-Produção%20%2F%20Homologado-success.svg)]()
 
-> **Implementação rigorosa de um pipeline completo de 6 estágios para classificação botânica de grão fino (*Fine-Grained Visual Categorization - FGVC*), abrangendo Transfer Learning com MobileNetV2, Progressive Fine-Tuning em dois estágios, Benchmarking Multiparadigma, Interpretabilidade Visual com Grad-CAM real, Calibração Probabilística e Governança de Drift.**
+> **Implementação de um pipeline completo de 6 estágios para classificação botânica de grão fino (*Fine-Grained Visual Categorization - FGVC*), abrangendo Transfer Learning com MobileNetV2, Progressive Fine-Tuning em dois estágios, Benchmarking Multiparadigma, Interpretabilidade Visual com Grad-CAM real, Calibração Probabilística e Governança de Drift.**
 
 ---
 
