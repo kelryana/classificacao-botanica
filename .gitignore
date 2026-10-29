@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.pytest_cache/
 
 # Datasets & Big Data
 data/
@@ -38,3 +39,5 @@ artigo_classificacao_botanica*.docx
 artigo_classificacao_botanica*.pdf
 resultados_botanico/*.docx
 gerar_artigo_academico.py
+AUDITORIA_METODOLOGICA.md
+
