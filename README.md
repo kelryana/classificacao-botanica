@@ -137,8 +137,3 @@ classificacao-botanica/
 ├── test_pipeline.py                # Suíte de 12 testes unitários (pytest)
 └── executar_colab.ipynb            # Notebook executável e documentado para Google Colab Pro
 ```
-
----
-- SELVARAJU, R. R. et al. Grad-CAM: Visual explanations from deep networks via gradient-based localization. In: **IEEE International Conference on Computer Vision (ICCV)**, p. 618–626, 2017.
-- WÄLDCHEN, J.; MÄDER, P. Machine learning for image based species identification. **Methods in Ecology and Evolution**, v. 9, n. 11, p. 2216–2225, 2018.
-- YOSINSKI, J. et al. How transferable are features in deep neural networks? In: **Advances in Neural Information Processing Systems (NeurIPS)**, v. 27, p. 3320–3328, 2014.
