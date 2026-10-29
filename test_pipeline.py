@@ -1,14 +1,3 @@
-"""
-SUÍTE DE TESTES DE SOFTWARE E VERIFICAÇÃO METODOLÓGICA
-Testes unitários e de integração para validar:
-1. Cálculo de calibração probabilística (ECE, Brier Score, NLL), incluindo casos-limite (p=1.0 e bins vazios).
-2. Cálculo de tabela de contingência e teste de McNemar com correção de Edwards.
-3. Intervalos de confiança e bootstrap pareado de diferenças.
-4. Integridade dimensional e fluxo do modelo FlowerClassifier.
-5. Invariância de BatchNorm do backbone em modo eval() durante a Fase 1.
-6. Cálculo dinâmico de métricas (sem constantes hardcoded).
-"""
-
 import pytest
 import numpy as np
 import torch
@@ -30,7 +19,7 @@ from pipeline_botanico import (
 
 class TestMetrics:
     def test_classification_metrics_perfect(self):
-        """Testa métricas com previsões 100% corretas."""
+       
         y_true = np.array([0, 1, 2, 3, 4])
         # Probabilidades com 1.0 na classe correta
         y_probs = np.zeros((5, 10))
@@ -42,7 +31,7 @@ class TestMetrics:
         assert metrics["f1_macro"] == pytest.approx(100.0)
 
     def test_classification_metrics_imperfect(self):
-        """Testa métricas com predições imperfeitas conhecidas."""
+        
         y_true = np.array([0, 1, 2, 3])
         # Amostras:
         # idx 0 (true=0): probs [0.8, 0.2, 0.0, 0.0] -> top1=0 (acerto), top2=[0, 1] (acerto)
@@ -62,7 +51,7 @@ class TestMetrics:
 
 class TestCalibrationECE:
     def test_ece_perfect_calibration(self):
-        """Em predições perfeitamente calibradas, ECE deve ser aproximadamente zero."""
+       
         # Cria 100 amostras com confiança 0.8 onde exatamente 80% acertam
         y_true = np.zeros(100, dtype=int)
         y_probs = np.zeros((100, 2))
@@ -76,7 +65,7 @@ class TestCalibrationECE:
         assert calib["ece"] == pytest.approx(0.0, abs=1e-5)
 
     def test_ece_edge_case_prob_one(self):
-        """Verifica se confianças exatamente iguais a 1.0 são alocadas com segurança no último bin."""
+        
         y_true = np.array([0, 1, 2])
         y_probs = np.zeros((3, 3))
         y_probs[0, 0] = 1.0
@@ -91,7 +80,7 @@ class TestCalibrationECE:
         assert calib["ece"] == pytest.approx(1.0 / 3.0, abs=1e-4)
 
     def test_ece_empty_bins_handling(self):
-        """Bins desabitados devem ter contagem 0 e acc None, não distorcendo a acurácia como 0%."""
+       
         y_true = np.array([0, 0])
         y_probs = np.array([[0.95, 0.05], [0.95, 0.05]])
         
@@ -106,7 +95,7 @@ class TestCalibrationECE:
 
 class TestMcNemarEdwards:
     def test_contingency_table(self):
-        """Verifica contagem correta de discordâncias b e c."""
+      
         y_true  = np.array([0, 1, 0, 1, 0])
         preds_a = np.array([0, 0, 0, 1, 1])  # acerta idx 0, 2, 3; erra idx 1, 4
         preds_b = np.array([1, 1, 0, 1, 0])  # acerta idx 1, 2, 3, 4; erra idx 0
@@ -118,7 +107,7 @@ class TestMcNemarEdwards:
         assert c == 1
 
     def test_mcnemar_known_values(self):
-        """Testa o cálculo do chi2 de Edwards com valores conhecidos."""
+        
         # Se b = 372 e c = 132:
         # (|372 - 132| - 1)^2 / (372 + 132) = 239^2 / 504 = 57121 / 504 = 113.3353
         res = compute_mcnemar(372, 132, correction=True)
@@ -128,7 +117,7 @@ class TestMcNemarEdwards:
         assert res["significant_005"] is True
 
     def test_mcnemar_identical_models(self):
-        """Modelos idênticos não devem ter divergência (chi2 = 0, p = 1.0)."""
+      
         res = compute_mcnemar(0, 0, correction=True)
         assert res["chi2"] == 0.0
         assert res["p_value"] == 1.0
@@ -137,7 +126,7 @@ class TestMcNemarEdwards:
 
 class TestBootstrap:
     def test_paired_bootstrap(self):
-        """Verifica que o bootstrap pareado captura o ganho real de acurácia."""
+       
         rng = np.random.RandomState(42)
         n = 500
         y_true = rng.randint(0, 5, size=n)
@@ -156,7 +145,7 @@ class TestBootstrap:
 
 class TestArchitectureAndBatchNorm:
     def test_flower_classifier_forward(self):
-        """Verifica as dimensões de entrada e saída da FlowerClassifier."""
+       
         backbone = models.mobilenet_v2(weights=None)
         classifier = FlowerClassifier(backbone, num_classes=102)
         x = torch.randn(2, 3, 224, 224)
@@ -164,7 +153,7 @@ class TestArchitectureAndBatchNorm:
         assert logits.shape == (2, 102)
 
     def test_freeze_backbone_bn_eval_mode(self):
-        """Garante que durante a Fase 1 o BatchNorm do backbone não atualize running_mean em eval()."""
+      
         backbone = models.mobilenet_v2(weights=None)
         classifier = FlowerClassifier(backbone, num_classes=102)
         
@@ -186,7 +175,7 @@ class TestArchitectureAndBatchNorm:
 
 class TestDataTransforms:
     def test_transforms_aspect_ratio_preservation(self):
-        """Valida que o transform de validação redimensiona mantendo proporção antes do CenterCrop."""
+       
         cfg = Config(img_size=224, resize_size=256)
         train_trans, val_trans = get_transforms(cfg)
         

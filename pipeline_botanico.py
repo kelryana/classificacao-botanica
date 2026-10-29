@@ -1,19 +1,3 @@
-"""
-PIPELINE DE ENGENHARIA DE VISÃO COMPUTACIONAL: CLASSIFICAÇÃO BOTÂNICA (OXFORD FLOWERS-102)
-TRANSFER LEARNING COM MOBILENETV2, FINE-TUNING PROGRESSIVO, BENCHMARKING MULTIPARADIGMA,
-INTERPRETABILIDADE VISUAL GRAD-CAM, CALIBRAÇÃO PROBABILÍSTICA E GOVERNANÇA DE DRIFT.
-
-Este script foi integralmente revisado e auditado para garantir rigor científico:
-- Eliminação de qualquer piso artificial de métrica (sem max(0.65, ...)), deltas de subconjunto ou extrapolações.
-- Testes estatísticos calculados rigorosamente sobre previsões pareadas (McNemar com correção de Edwards e Bootstrap pareado).
-- Remoção de atribuição artificial de famílias botânicas (i % len(FAMILIES)).
-- Cálculo corrigido de ECE (Expected Calibration Error) com tratamento correto de limites (p <= 1.0) e bins vazios.
-- Controle estrito do modo eval() em BatchNorm do backbone durante o congelamento da Fase 1.
-- Extração determinística de características para classificadores clássicos.
-- Redimensionamento isotrópico de teste/validação (Resize 256 + CenterCrop 224) preservando a razão de aspecto.
-- Persistência estruturada de predições (.npz), histórico (.json), métricas (.json) e metadados (.json).
-"""
-
 import os
 import sys
 import gc
@@ -62,12 +46,6 @@ except ImportError:
         umap = None
 
 
-
-
-# ==============================================================================
-# 1. CONFIGURAÇÃO CENTRALIZADA E REPRODUTIBILIDADE
-# ==============================================================================
-
 @dataclass
 class Config:
     seed: int = 42
@@ -103,18 +81,13 @@ class Config:
 
 
 def seed_everything(seed: int = 42):
-    """Garante determinismo em geradores pseudo-aleatórios do ecossistema Python/PyTorch."""
+   
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-# ==============================================================================
-# 2. NOMES OFICIAIS DO DATASET OXFORD FLOWERS-102
-# ==============================================================================
 
 # Relação oficial das 102 espécies botânicas (índices 0 a 101)
 FLOWER_NAMES = [
@@ -151,23 +124,15 @@ STD  = [0.229, 0.224, 0.225]
 
 
 def denormalize(tensor: torch.Tensor, mean: List[float] = MEAN, std: List[float] = STD) -> torch.Tensor:
-    """Reverte a normalização ImageNet para renderização óptica RGB [0, 1]."""
+  
     t = tensor.clone().detach().cpu()
     for c in range(3):
         t[c] = t[c] * std[c] + mean[c]
     return torch.clamp(t, 0.0, 1.0)
 
 
-# ==============================================================================
-# 3. TRANSFORMAÇÕES E DATA LOADERS
-# ==============================================================================
-
 def get_transforms(cfg: Config) -> Tuple[transforms.Compose, transforms.Compose]:
-    """
-    Retorna pipelines de transformação:
-    - Treinamento: Aumento estocástico (RandomResizedCrop, Flip, Rotation, ColorJitter).
-    - Validação / Teste: Redimensionamento com preservação de aspect-ratio (Resize 256 + CenterCrop 224).
-    """
+ 
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(cfg.img_size, scale=(0.7, 1.0), ratio=(0.85, 1.15), antialias=True),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -186,16 +151,8 @@ def get_transforms(cfg: Config) -> Tuple[transforms.Compose, transforms.Compose]
 
     return train_transform, val_test_transform
 
-
-# ==============================================================================
-# 4. MODELO: FLOWERCLASSIFIER (MOBILENETV2 + CABEÇA MLP DILATADA)
-# ==============================================================================
-
 class FlowerClassifier(nn.Module):
-    """
-    Arquitetura de classificação botânica composta pelo extrator convolucional
-    MobileNetV2 acoplado a uma cabeça MLP densa com regularização por Dropout e BatchNorm.
-    """
+   
     def __init__(self, backbone: nn.Module, num_classes: int = 102):
         super().__init__()
         self.backbone = backbone
@@ -215,12 +172,8 @@ class FlowerClassifier(nn.Module):
         return self.head(pooled)
 
 
-# ==============================================================================
-# 5. MÓDULO MATEMÁTICO E ESTATÍSTICO (AUDITÁVEL E TESTÁVEL)
-# ==============================================================================
-
 def compute_classification_metrics(y_true: np.ndarray, y_probs: np.ndarray, k: int = 5, labels: Optional[np.ndarray] = None) -> Dict[str, float]:
-    """Calcula Top-1, Top-k e Macro F1-Score a partir de probabilidades e ground-truth."""
+   
     y_preds = np.argmax(y_probs, axis=1)
     n_classes = y_probs.shape[1]
     if labels is None:
@@ -237,11 +190,7 @@ def compute_classification_metrics(y_true: np.ndarray, y_probs: np.ndarray, k: i
 
 
 def compute_contingency_table(y_true: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray) -> Tuple[int, int]:
-    """
-    Calcula as contagens discordantes b e c para testes pareados (ex: McNemar):
-    - b: Amostras onde A errou e B acertou.
-    - c: Amostras onde A acertou e B errou.
-    """
+  
     corr_a = (preds_a == y_true)
     corr_b = (preds_b == y_true)
     b = int(np.sum(~corr_a & corr_b))
@@ -250,11 +199,7 @@ def compute_contingency_table(y_true: np.ndarray, preds_a: np.ndarray, preds_b: 
 
 
 def compute_mcnemar(b: int, c: int, correction: bool = True) -> Dict[str, Any]:
-    """
-    Calcula o Teste de McNemar com correção de continuidade de Edwards:
-    chi2 = (|b - c| - 1)^2 / (b + c)
-    Retorna chi2, graus de liberdade (df=1) e valor-p assintótico (scipy.stats.chi2.sf).
-    """
+  
     total_disc = b + c
     if total_disc == 0:
         return {"b": b, "c": c, "chi2": 0.0, "df": 1, "p_value": 1.0, "significant_005": False}
@@ -280,10 +225,7 @@ def compute_mcnemar(b: int, c: int, correction: bool = True) -> Dict[str, Any]:
 
 def compute_paired_bootstrap(y_true: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray,
                              n_boot: int = 1000, seed: int = 42) -> Dict[str, float]:
-    """
-    Bootstrap pareado da diferença de acurácia entre dois classificadores (A vs B):
-    Reamostra instâncias com reposição preservando o pareamento amostral.
-    """
+   
     rng = np.random.RandomState(seed)
     n = len(y_true)
     corr_a = (preds_a == y_true).astype(float)
@@ -307,7 +249,7 @@ def compute_paired_bootstrap(y_true: np.ndarray, preds_a: np.ndarray, preds_b: n
 
 def compute_bootstrap_ci(y_true: np.ndarray, preds: np.ndarray,
                          n_boot: int = 1000, seed: int = 42) -> Dict[str, float]:
-    """Estima o intervalo de confiança assintótico de 95% para a acurácia de um modelo via Bootstrap."""
+    
     rng = np.random.RandomState(seed)
     n = len(y_true)
     corr = (preds == y_true).astype(float)
@@ -327,13 +269,7 @@ def compute_bootstrap_ci(y_true: np.ndarray, preds: np.ndarray,
 
 
 def compute_calibration_metrics(y_true: np.ndarray, y_probs: np.ndarray, n_bins: int = 10) -> Dict[str, Any]:
-    """
-    Calcula métricas de calibração probabilística com rigor numérico:
-    - Expected Calibration Error (ECE) com suporte seguro a confianças de 0.0 a 1.0.
-    - Tratamento explícito de bins vazios (não atribui acurácia zero a bins desabitados).
-    - Multiclass Brier Score.
-    - Negative Log-Likelihood (NLL).
-    """
+  
     confidences = np.max(y_probs, axis=1)
     predictions = np.argmax(y_probs, axis=1)
     accuracies = (predictions == y_true).astype(float)
@@ -386,14 +322,9 @@ def compute_calibration_metrics(y_true: np.ndarray, y_probs: np.ndarray, n_bins:
         "bin_counts": bin_counts
     }
 
-
-# ==============================================================================
-# 6. EXTRAÇÃO DE EMBEDDINGS E TREINAMENTO DE MODELOS
-# ==============================================================================
-
 @torch.no_grad()
 def extract_embeddings(model_bb: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Extrai representações vetoriais de 1280-d de forma determinística utilizando o backbone congelado."""
+   
     model_bb.eval()
     feats, labs = [], []
     for imgs, lbls in loader:
@@ -411,11 +342,7 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module,
               scaler: Optional[GradScaler] = None,
               device: torch.device = torch.device("cpu"),
               is_phase1: bool = False) -> Tuple[float, float]:
-    """
-    Executa uma época de treinamento ou validação.
-    Na Fase 1, se is_phase1=True, assegura que o backbone permaneça em eval() para
-    congelar estritamente as médias e variâncias correntes do BatchNorm.
-    """
+   
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
     if is_train and is_phase1:
@@ -452,7 +379,7 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module,
 
 @torch.no_grad()
 def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
-    """Gera matriz de probabilidades Softmax e ground-truth em modo estritamente avaliativo."""
+    
     model.eval()
     probs_list, labels_list = [], []
     use_amp = (device.type == "cuda")
@@ -472,12 +399,7 @@ def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -
 
 @torch.no_grad()
 def evaluate_tta_full(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Test-Time Augmentation (TTA) avaliado no conjunto COMPLETO do dataloader:
-    Combina predições da imagem padrão e de sua reflexão horizontal espelar:
-    P_TTA = 0.5 * P(X) + 0.5 * P(Flip(X))
-    Sem amostragem parcial, sem piso artificial max(), calculando sobre todas as amostras.
-    """
+   
     model.eval()
     probs_list, labels_list = [], []
     use_amp = (device.type == "cuda")
@@ -496,13 +418,8 @@ def evaluate_tta_full(model: nn.Module, loader: DataLoader, device: torch.device
     all_labels = torch.cat(labels_list).numpy()
     return all_probs, all_labels
 
-
-# ==============================================================================
-# 7. INTERPRETABILIDADE VISUAL GRAD-CAM REAL
-# ==============================================================================
-
 class GradCAM:
-    """Implementação do algoritmo Gradient-weighted Class Activation Mapping (Selvaraju et al., 2017)."""
+    
     def __init__(self, model: nn.Module, target_layer: nn.Module):
         self.model = model
         self.target_layer = target_layer
@@ -539,20 +456,15 @@ class GradCAM:
         pred_prob = torch.softmax(logits, dim=1)[0, class_idx].item()
         return cam, class_idx, pred_prob
 
-
-# ==============================================================================
-# 8. GERAÇÃO DE FIGURAS TÉCNICAS EM ALTA RESOLUÇÃO (300 DPI)
-# ==============================================================================
-
 def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Dataset,
                        model: Optional[FlowerClassifier] = None, device: Optional[torch.device] = None):
     """Gera e salva as 11 figuras com rigor estético e rastreabilidade numérica."""
     os.makedirs(plots_dir, exist_ok=True)
     sns.set_theme(style="whitegrid", palette="muted")
     
-    # --------------------------------------------------------------------------
+
     # F01: Grid de Amostras Reais (3x6)
-    # --------------------------------------------------------------------------
+
     print("[1/11] Gerando F01: Grid de Amostras Reais (Oxford Flowers-102)...")
     fig, axes = plt.subplots(3, 6, figsize=(18, 9), dpi=300)
     indices = np.linspace(0, len(test_dataset) - 1, 18, dtype=int)
@@ -569,9 +481,8 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
     fig.savefig(os.path.join(plots_dir, "F01_amostras_dataset.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    # --------------------------------------------------------------------------
     # F02: Pipeline de Aumento de Dados
-    # --------------------------------------------------------------------------
+
     print("[2/11] Gerando F02: Pipeline de Aumento de Dados...")
     sample_raw_img, sample_lbl = test_dataset[10]
     sample_np = denormalize(sample_raw_img).permute(1, 2, 0).numpy()
@@ -604,9 +515,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
     fig.savefig(os.path.join(plots_dir, "F02_data_augmentation.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F03: Hierarquia de Features e Filtros
-    # --------------------------------------------------------------------------
+
     if model is not None and device is not None:
         print("[3/11] Gerando F03: Filtros Convolucionais 3x3 e Ativações Reais da MobileNetV2...")
         fig = plt.figure(figsize=(16, 8.5), dpi=300)
@@ -653,9 +564,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F03_hierarquia_features.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F04: Projeção UMAP 2D dos Embeddings (Sem Famílias Artificiais)
-    # --------------------------------------------------------------------------
+
     if "umap_2d" in results:
         print("[4/11] Gerando F04: Projeção UMAP 2D dos Embeddings Reais (Sem Famílias Artificiais)...")
         umap_data = results["umap_2d"]
@@ -676,9 +587,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F04_umap_embeddings.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F05: Desempenho Comparativo de Classificadores
-    # --------------------------------------------------------------------------
+
     print("[5/11] Gerando F05: Desempenho Comparativo de Classificadores...")
     classic_res = results.get("models_summary", [])
     if classic_res:
@@ -704,9 +615,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F05_comparativo_classificadores.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F06: Curvas de Aprendizado da Fase 1
-    # --------------------------------------------------------------------------
+
     hist_p1 = results.get("history_p1", {})
     if hist_p1 and "train_loss" in hist_p1:
         print("[6/11] Gerando F06: Curvas Reais de Aprendizado da Fase 1...")
@@ -734,9 +645,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F06_curvas_aprendizado_fase1.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F07: Curvas Consolidadas Fase 1 + Fine-Tuning
-    # --------------------------------------------------------------------------
+
     hist_ft = results.get("history_ft", {})
     if hist_p1 and hist_ft and "train_loss" in hist_ft:
         print("[7/11] Gerando F07: Curvas Consolidadas Fase 1 + Fine-Tuning...")
@@ -773,9 +684,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F07_curvas_consolidadas_finetuning.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F08: Matriz de Confusão Global (102x102)
-    # --------------------------------------------------------------------------
+
     if "confusion_matrix" in results:
         print("[8/11] Gerando F08: Matriz de Confusão Global (102x102)...")
         cm = np.array(results["confusion_matrix"])
@@ -790,9 +701,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F08_matriz_confusao.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F09: Interpretabilidade Visual Grad-CAM Real
-    # --------------------------------------------------------------------------
+
     if model is not None and device is not None:
         print("[9/11] Gerando F09: Interpretabilidade Visual com Grad-CAM Real...")
         gradcam = GradCAM(model, model.backbone.features[-1])
@@ -825,9 +736,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F09_gradcam_interpretabilidade.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F10: Calibração Probabilística e Reliability Diagram
-    # --------------------------------------------------------------------------
+
     if "calibration" in results:
         print("[10/11] Gerando F10: Calibração Probabilística e Diagrama de Confiabilidade...")
         calib = results["calibration"]
@@ -872,9 +783,9 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F10_calibracao_confiabilidade.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-    # --------------------------------------------------------------------------
+
     # F11: Análise de Erros por Classe e Pares Críticos
-    # --------------------------------------------------------------------------
+
     if "confusion_matrix" in results:
         print("[11/11] Gerando F11: Desagregação por Classe e Pares Críticos de Confusão...")
         cm = np.array(results["confusion_matrix"])
@@ -924,14 +835,6 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         plt.close(fig)
 
     print("[OK] Figuras geradas com sucesso em:", plots_dir)
-
-
-
-
-
-# ==============================================================================
-# 10. PIPELINE PRINCIPAL (EXECUÇÃO DE PONTA A PONTA)
-# ==============================================================================
 
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Auditado de Classificação Botânica (Oxford Flowers-102)")
