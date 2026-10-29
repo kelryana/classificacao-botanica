@@ -122,7 +122,6 @@ O pipeline gera artefatos estruturados que permitem auditoria completa e indepen
 - `metrics.json`: Dicionário contendo todas as métricas numéricas calculadas (Top-1, Top-5, Macro F1, Brier Score, NLL, ECE, $\chi^2_{\text{Edwards}}$, $p$-valor e intervalos Bootstrap).
 - `predictions.npz`: Tensores NumPy contendo `y_true`, probabilidades Softmax e predições por classe de todos os modelos avaliados.
 - `checkpoint_best_ft.pth`: Pesos do modelo neural ajustado na Fase 2.
-- `relatorio_botanico.docx`: Relatório técnico estruturado com as 11 figuras técnicas em 300 DPI.
 
 ---
 
