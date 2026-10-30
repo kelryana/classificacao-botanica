@@ -60,26 +60,6 @@ A auditoria completa que reconcilia os números preliminares descartados (`79,88
 
 A suíte automatizada em [`test_pipeline.py`](test_pipeline.py) conta com **16 testes unitários** e um teste sintético de fumaça (`--smoke-test`) de ponta a ponta:
 
-<<<<<<< HEAD
-| Módulo / Teste | Propósito da Validação | Status Esperado |
-| :--- | :--- | :---: |
-| `test_classification_metrics_perfect` | Valida Top-1, Top-5, Macro F1 e contagens exatas com predições perfeitas | **APROVADO** |
-| `test_classification_metrics_imperfect` | Valida cálculo exato de Top-1, Top-2 e contagens com erros controlados | **APROVADO** |
-| `test_ece_perfect_calibration` | Confirma que predições perfeitamente calibradas resultam em $\text{ECE} \approx 0$ | **APROVADO** |
-| `test_ece_edge_case_prob_one` | Testa se amostras com probabilidade $1,0$ são alocadas no último bin $[0,9, 1,0]$ | **APROVADO** |
-| `test_ece_empty_bins_handling` | Assegura que bins vazios recebam `None` e não acurácia artificial $0\%$ | **APROVADO** |
-| `test_contingency_table` | Valida contagens discordantes pareadas $b$ e $c$ | **APROVADO** |
-| `test_mcnemar_known_values` | Valida $\chi^2_{\text{Edwards}}$ e $p$-valor (incluindo $b=457, c=277 \Rightarrow \chi^2=43,6526$) | **APROVADO** |
-| `test_mcnemar_identical_models` | Verifica se modelos idênticos retornam $\chi^2 = 0$ e $p = 1,0$ | **APROVADO** |
-| `test_paired_bootstrap` | Valida que o Bootstrap pareado estima corretamente intervalos de diferença | **APROVADO** |
-| `test_flower_classifier_forward` | Valida dimensões de entrada $(B, 3, 224, 224)$ e saída $(B, 102)$ | **APROVADO** |
-| `test_freeze_backbone_bn_eval_mode` | Garante que `running_mean` e `running_var` do `BatchNorm2d` não mudem na Fase 1 | **APROVADO** |
-| `test_deterministic_embedding_extraction` | Confirma determinismo bit-a-bit na extração de embeddings em `eval()` | **APROVADO** |
-| `test_tta_full_averaging_no_floor` | Verifica média de probabilidades do TTA no loader completo sem piso forçado | **APROVADO** |
-| `test_transforms_aspect_ratio_preservation` | Confirma redimensionamento isotrópico de imagens retangulares | **APROVADO** |
-| `test_flower_names_completeness` | Verifica as 102 classes em `FLOWER_NAMES` e `FLOWER_SCIENTIFIC_NAMES` | **APROVADO** |
-| `test_recalculate_metrics_from_npz` | Valida recálculo completo de métricas e testes estatísticos via `predictions.npz` | **APROVADO** |
-=======
 | Módulo / Teste | Propósito da Validação 
 | :--- | :--- | 
 | `test_classification_metrics_perfect` | Valida Top-1, Top-5 e F1 com predições perfeitas em subsets de classes | 
@@ -94,7 +74,6 @@ A suíte automatizada em [`test_pipeline.py`](test_pipeline.py) conta com **16 t
 | `test_flower_classifier_forward` | Valida dimensões de entrada $(B, 3, 224, 224)$ e saída $(B, 102)$ do modelo | 
 | `test_freeze_backbone_bn_eval_mode` | Garante que `running_mean` do BatchNorm não se altere durante a Fase 1 | 
 | `test_transforms_aspect_ratio_preservation` | Confirma redimensionamento isotrópico de imagens retangulares | 
->>>>>>> refs/remotes/origin/main
 
 Para executar os testes e o smoke test localmente:
 ```bash
@@ -110,9 +89,8 @@ Para executar os testes e o smoke test localmente:
 1. Abra o notebook [`executar_colab.ipynb`](executar_colab.ipynb) no Google Colab Pro com acelerador GPU habilitado.
 2. Execute as células em sequência para registrar a GPU real da sessão, montar o Google Drive, rodar os 16 testes unitários + smoke test, treinar o pipeline completo com `--drive-backup-dir` e verificar os resultados via `--verify-only`.
 
-<<<<<<< HEAD
 ### Opção B: Linha de Comando
-=======
+
 As versões exatas e compatíveis estão fixadas no arquivo [`requirements.txt`](requirements.txt).
 
 ---
@@ -149,10 +127,6 @@ python pipeline_botanico.py --verify-only ./resultados_botanico/predictions.npz
 
 ```
 
----
-
-<<<<<<< HEAD
-=======
 ## Protocolo de Avaliação Estatística e Calibração
 
 O pipeline gera artefatos estruturados que permitem auditoria completa e independente:
@@ -162,12 +136,10 @@ O pipeline gera artefatos estruturados que permitem auditoria completa e indepen
 
 ---
 
->>>>>>> refs/remotes/origin/main
 ## Estrutura do Repositório
 
 ```text
 classificacao-botanica/
-<<<<<<< HEAD
 ├── README.md                             # Documentação técnica e guia de reprodutibilidade
 ├── requirements.txt                      # Dependências do projeto
 ├── pipeline_botanico.py                  # Pipeline principal de treinamento, avaliação e auditoria
@@ -175,11 +147,4 @@ classificacao-botanica/
 ├── executar_colab.ipynb                  # Notebook preparado para execução no Google Colab Pro
 └── resultados_botanico/
     └── plots/                            # 11 figuras técnicas em alta resolução (300 DPI, F01..F11.png)
-=======
-├── README.md                       # Documentação técnica e metodológica (este arquivo)
-├── requirements.txt                # Dependências fixadas e compatíveis
-├── pipeline_botanico.py            # Pipeline completo de engenharia e modelagem
-├── test_pipeline.py                # Suíte de 12 testes unitários (pytest)
-└── executar_colab.ipynb            # Notebook executável e documentado para Google Colab Pro
->>>>>>> refs/remotes/origin/main
 ```
