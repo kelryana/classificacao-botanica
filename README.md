@@ -11,7 +11,7 @@
 
 ##  Visão Geral
 
-Classificar espécies botânicas por imagens é um desafio clássico de visão computacional devido a duas características naturais:
+Classificar espécies botânicas por imagens é um desafio de visão computacional devido a duas características naturais:
 1. **Alta variação na mesma espécie:** Diferenças de iluminação, idade da flor, ângulos e clima mudam drasticamente a aparência de uma mesma planta.
 2. **Alta similaridade entre espécies diferentes:** Famílias botânicas distintas costumam compartilhar cores e simetrias quase idênticas.
 
