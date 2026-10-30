@@ -1,16 +1,26 @@
+import os
+import tempfile
 import pytest
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 from torchvision import models
 
 from pipeline_botanico import (
+    FLOWER_NAMES,
+    FLOWER_SCIENTIFIC_NAMES,
     compute_classification_metrics,
     compute_contingency_table,
     compute_mcnemar,
     compute_paired_bootstrap,
     compute_bootstrap_ci,
     compute_calibration_metrics,
+    recalculate_metrics_from_npz,
+    extract_embeddings,
+    evaluate_tta_full,
+    run_epoch,
     FlowerClassifier,
     Config,
     get_transforms
@@ -19,7 +29,6 @@ from pipeline_botanico import (
 
 class TestMetrics:
     def test_classification_metrics_perfect(self):
-       
         y_true = np.array([0, 1, 2, 3, 4])
         # Probabilidades com 1.0 na classe correta
         y_probs = np.zeros((5, 10))
@@ -29,9 +38,10 @@ class TestMetrics:
         assert metrics["top1"] == 100.0
         assert metrics["top5"] == 100.0
         assert metrics["f1_macro"] == pytest.approx(100.0)
+        assert metrics["n_correct"] == 5
+        assert metrics["n_total"] == 5
 
     def test_classification_metrics_imperfect(self):
-        
         y_true = np.array([0, 1, 2, 3])
         # Amostras:
         # idx 0 (true=0): probs [0.8, 0.2, 0.0, 0.0] -> top1=0 (acerto), top2=[0, 1] (acerto)
@@ -47,11 +57,12 @@ class TestMetrics:
         metrics = compute_classification_metrics(y_true, y_probs, k=2)
         assert metrics["top1"] == 50.0   # 2 de 4 acertos no top 1
         assert metrics["top2"] == 75.0   # 3 de 4 acertos no top 2
+        assert metrics["n_correct"] == 2
+        assert metrics["n_total"] == 4
 
 
 class TestCalibrationECE:
     def test_ece_perfect_calibration(self):
-       
         # Cria 100 amostras com confiança 0.8 onde exatamente 80% acertam
         y_true = np.zeros(100, dtype=int)
         y_probs = np.zeros((100, 2))
@@ -59,19 +70,19 @@ class TestCalibrationECE:
         y_probs[:, 1] = 0.2
         # 80 acertam (classe 0), 20 erram (classe 1)
         y_true[80:] = 1
-        
+
         calib = compute_calibration_metrics(y_true, y_probs, n_bins=10)
         # O bin de 0.8 tem 100 amostras, acc = 0.8, conf = 0.8 -> erro do bin = 0
         assert calib["ece"] == pytest.approx(0.0, abs=1e-5)
+        assert calib["total_counted"] == 100
 
     def test_ece_edge_case_prob_one(self):
-        
         y_true = np.array([0, 1, 2])
         y_probs = np.zeros((3, 3))
         y_probs[0, 0] = 1.0
         y_probs[1, 1] = 1.0
         y_probs[2, 0] = 1.0  # Erro com confiança 1.0
-        
+
         calib = compute_calibration_metrics(y_true, y_probs, n_bins=10)
         assert calib["bin_counts"][-1] == 3  # Todas as 3 devem estar no bin 9 ([0.9, 1.0])
         assert calib["bin_accs"][-1] == pytest.approx(2.0 / 3.0)
@@ -80,10 +91,9 @@ class TestCalibrationECE:
         assert calib["ece"] == pytest.approx(1.0 / 3.0, abs=1e-4)
 
     def test_ece_empty_bins_handling(self):
-       
         y_true = np.array([0, 0])
         y_probs = np.array([[0.95, 0.05], [0.95, 0.05]])
-        
+
         calib = compute_calibration_metrics(y_true, y_probs, n_bins=10)
         # Apenas o último bin tem contagem > 0
         for b in range(9):
@@ -95,11 +105,10 @@ class TestCalibrationECE:
 
 class TestMcNemarEdwards:
     def test_contingency_table(self):
-      
         y_true  = np.array([0, 1, 0, 1, 0])
         preds_a = np.array([0, 0, 0, 1, 1])  # acerta idx 0, 2, 3; erra idx 1, 4
         preds_b = np.array([1, 1, 0, 1, 0])  # acerta idx 1, 2, 3, 4; erra idx 0
-        
+
         # A errou e B acertou: idx 1 (true=1, a=0, b=1) e idx 4 (true=0, a=1, b=0) -> b = 2
         # A acertou e B errou: idx 0 (true=0, a=0, b=1) -> c = 1
         b, c = compute_contingency_table(y_true, preds_a, preds_b)
@@ -107,7 +116,6 @@ class TestMcNemarEdwards:
         assert c == 1
 
     def test_mcnemar_known_values(self):
-        
         # Se b = 372 e c = 132:
         # (|372 - 132| - 1)^2 / (372 + 132) = 239^2 / 504 = 57121 / 504 = 113.3353
         res = compute_mcnemar(372, 132, correction=True)
@@ -116,8 +124,12 @@ class TestMcNemarEdwards:
         assert res["p_value"] < 1e-20
         assert res["significant_005"] is True
 
+        # Verifica os valores reais da execução Colab (b = 457, c = 277)
+        res_ft = compute_mcnemar(457, 277, correction=True)
+        assert res_ft["chi2"] == pytest.approx(43.652588, abs=1e-4)
+        assert res_ft["p_value"] == pytest.approx(3.9216e-11, rel=1e-3)
+
     def test_mcnemar_identical_models(self):
-      
         res = compute_mcnemar(0, 0, correction=True)
         assert res["chi2"] == 0.0
         assert res["p_value"] == 1.0
@@ -126,7 +138,6 @@ class TestMcNemarEdwards:
 
 class TestBootstrap:
     def test_paired_bootstrap(self):
-       
         rng = np.random.RandomState(42)
         n = 500
         y_true = rng.randint(0, 5, size=n)
@@ -145,7 +156,6 @@ class TestBootstrap:
 
 class TestArchitectureAndBatchNorm:
     def test_flower_classifier_forward(self):
-       
         backbone = models.mobilenet_v2(weights=None)
         classifier = FlowerClassifier(backbone, num_classes=102)
         x = torch.randn(2, 3, 224, 224)
@@ -153,33 +163,94 @@ class TestArchitectureAndBatchNorm:
         assert logits.shape == (2, 102)
 
     def test_freeze_backbone_bn_eval_mode(self):
-      
         backbone = models.mobilenet_v2(weights=None)
         classifier = FlowerClassifier(backbone, num_classes=102)
-        
-        # Simula estado de Fase 1
-        classifier.train()
-        classifier.backbone.eval()  # Congelamento estrito
-        
+
+        # Simula estado de Fase 1 via run_epoch
+        for p in classifier.backbone.parameters():
+            p.requires_grad = False
+
         bn = classifier.backbone.features[0][1]
         assert isinstance(bn, nn.BatchNorm2d)
         initial_mean = bn.running_mean.clone()
-        
-        # Passa batch de dados
-        x = torch.randn(4, 3, 224, 224) * 5.0 + 10.0
-        _ = classifier(x)
-        
-        # Em modo eval(), running_mean não deve sofrer alteração!
+        initial_var = bn.running_var.clone()
+
+        x = torch.randn(8, 3, 224, 224) * 5.0 + 10.0
+        y = torch.randint(0, 102, (8,))
+        loader = DataLoader(TensorDataset(x, y), batch_size=4)
+        opt = optim.AdamW(classifier.head.parameters(), lr=1e-3)
+        criterion = nn.CrossEntropyLoss()
+
+        run_epoch(classifier, loader, criterion, opt, None, torch.device("cpu"), is_phase1=True)
+
+        # Em modo eval(), running_mean e running_var não devem sofrer qualquer alteração!
         assert torch.equal(bn.running_mean, initial_mean)
+        assert torch.equal(bn.running_var, initial_var)
+
+    def test_deterministic_embedding_extraction(self):
+        backbone = models.mobilenet_v2(weights=None)
+        x = torch.randn(6, 3, 224, 224)
+        y = torch.tensor([0, 1, 2, 3, 4, 5])
+        loader = DataLoader(TensorDataset(x, y), batch_size=3, shuffle=False)
+        emb1, lbl1 = extract_embeddings(backbone, loader, torch.device("cpu"))
+        emb2, lbl2 = extract_embeddings(backbone, loader, torch.device("cpu"))
+        assert torch.equal(emb1, emb2)
+        assert torch.equal(lbl1, lbl2)
+
+    def test_tta_full_averaging_no_floor(self):
+        backbone = models.mobilenet_v2(weights=None)
+        classifier = FlowerClassifier(backbone, num_classes=10)
+        x = torch.randn(6, 3, 224, 224)
+        y = torch.tensor([0, 1, 2, 3, 4, 5])
+        loader = DataLoader(TensorDataset(x, y), batch_size=3, shuffle=False)
+        probs_tta, labels_tta = evaluate_tta_full(classifier, loader, torch.device("cpu"))
+        assert probs_tta.shape == (6, 10)
+        assert np.allclose(probs_tta.sum(axis=1), 1.0, atol=1e-5)
+        assert np.array_equal(labels_tta, y.numpy())
 
 
-class TestDataTransforms:
+class TestDataTransformsAndMetadata:
     def test_transforms_aspect_ratio_preservation(self):
-       
         cfg = Config(img_size=224, resize_size=256)
         train_trans, val_trans = get_transforms(cfg)
-        
+
         from PIL import Image
         img_rect = Image.new("RGB", (400, 200), color="red")  # retangular 2:1
         tensor_out = val_trans(img_rect)
         assert tensor_out.shape == (3, 224, 224)
+
+    def test_flower_names_completeness(self):
+        assert len(FLOWER_NAMES) == 102
+        assert len(FLOWER_SCIENTIFIC_NAMES) == 102
+        assert all(isinstance(n, str) and len(n) > 2 for n in FLOWER_NAMES)
+        assert all(isinstance(s, str) and " " in s for s in FLOWER_SCIENTIFIC_NAMES)
+
+    def test_recalculate_metrics_from_npz(self):
+        rng = np.random.RandomState(42)
+        n = 50
+        k = 6
+        y_true = rng.randint(0, k, size=n)
+        logits_p1 = rng.randn(n, k)
+        probs_p1 = np.exp(logits_p1) / np.exp(logits_p1).sum(axis=1, keepdims=True)
+        logits_ft = logits_p1.copy()
+        logits_ft[np.arange(n), y_true] += 1.5
+        probs_ft = np.exp(logits_ft) / np.exp(logits_ft).sum(axis=1, keepdims=True)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            npz_path = os.path.join(tmpdir, "predictions.npz")
+            np.savez_compressed(
+                npz_path,
+                y_true=y_true,
+                probs_p1=probs_p1,
+                preds_p1=np.argmax(probs_p1, axis=1),
+                probs_ft=probs_ft,
+                preds_ft=np.argmax(probs_ft, axis=1),
+                probs_tta=probs_ft,
+                preds_classic_lr=np.argmax(probs_ft, axis=1),
+                probs_classic_lr=probs_ft
+            )
+            recalc = recalculate_metrics_from_npz(npz_path, n_boot=100, seed=42)
+            assert recalc["n_samples"] == n
+            assert recalc["metrics_ft"]["top1"] >= recalc["metrics_p1"]["top1"]
+            assert recalc["calibration_ft"]["total_counted"] == n
+            assert "Regressão Logística L2" in recalc["classics"]

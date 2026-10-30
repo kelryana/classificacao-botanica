@@ -4,15 +4,19 @@ import gc
 import json
 import time
 import math
+import shutil
 import argparse
 import platform
+import subprocess
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 import pandas as pd
+import scipy
 from scipy import stats
+import sklearn
 
 # Configuração de Backend Gráfico para ambiente headless
 import matplotlib
@@ -26,6 +30,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.amp import autocast, GradScaler
+import torchvision
 from torchvision import datasets, transforms, models
 
 # Algoritmos Clássicos e Métricas
@@ -52,36 +57,45 @@ class Config:
     run_id: str = "run_auditada"
     base_dir: str = "./resultados_botanico"
     data_dir: str = "./data"
+    drive_backup_dir: Optional[str] = None
     batch_size_train: int = 32
     batch_size_eval: int = 64
     num_workers: int = 2
     num_classes: int = 102
     img_size: int = 224
     resize_size: int = 256
-    
+
     # Fase 1: Treinamento da Cabeça MLP
     epochs_phase1: int = 8
     lr_phase1: float = 1e-3
     freeze_backbone_bn: bool = True  # Mantém BatchNorm do backbone em eval()
-    
+
     # Fase 2: Fine-Tuning Progressivo
     epochs_phase2: int = 4
     lr_phase2_backbone: float = 1e-4
     lr_phase2_head: float = 5e-4
     weight_decay: float = 1e-4
-    
+    scheduler_name: str = "none"     # Sem scheduler por padrão (taxas fixas por fase)
+    checkpoint_criterion: str = "min_val_loss"
+
+    # Projeção Exploratória UMAP
+    umap_split: str = "train_val"    # 'train_val' (recomendado para evitar exposição do teste) ou 'test'
+    umap_max_samples: int = 1500
+    umap_n_neighbors: int = 15
+    umap_min_dist: float = 0.3
+
     # Avaliação e TTA
-    run_tta_test: bool = True        # Executa TTA no teste completo se True
+    run_tta_test: bool = True        # Executa TTA (média imagem original + flip horizontal) no teste completo
     n_bootstrap: int = 1000
     n_calibration_bins: int = 10
-    
+
     # Hardware & Performance
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     use_amp: bool = torch.cuda.is_available()
 
 
 def seed_everything(seed: int = 42):
-   
+    """Fixa sementes pseudoaleatórias em NumPy, PyTorch (CPU/CUDA) e cuDNN."""
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -89,7 +103,8 @@ def seed_everything(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-# Relação oficial das 102 espécies botânicas (índices 0 a 101)
+
+# Relação oficial das 102 espécies botânicas (índices 0 a 101) — nomes comuns em inglês
 FLOWER_NAMES = [
     "Pink Primrose", "Hard-Leaved Pocket Orchid", "Canterbury Bells", "Sweet Pea",
     "English Marigold", "Tiger Lily", "Moon Orchid", "Bird of Paradise",
@@ -119,12 +134,94 @@ FLOWER_NAMES = [
     "Trumpet Creeper", "Blackberry Lily"
 ]
 
+# Nomenclatura taxonômica binomial correspondente às 102 classes (índices 0 a 101)
+FLOWER_SCIENTIFIC_NAMES = [
+    "Oenothera speciosa", "Paphiopedilum micranthum", "Campanula medium", "Lathyrus odoratus",
+    "Calendula officinalis", "Lilium lancifolium", "Phalaenopsis amabilis", "Strelitzia reginae",
+    "Aconitum napellus", "Echinops ritro", "Antirrhinum majus", "Tussilago farfara",
+    "Protea cynaroides", "Cirsium vulgare", "Iris pseudacorus", "Trollius europaeus",
+    "Echinacea purpurea", "Alstroemeria aurea", "Platycodon grandiflorus", "Zantedeschia aethiopica",
+    "Lilium bulbiferum", "Scabiosa atropurpurea", "Fritillaria meleagris", "Alpinia purpurata",
+    "Muscari armeniacum", "Papaver rhoeas", "Amaranthus hypochondriacus", "Gentiana acaulis",
+    "Cynara cardunculus", "Dianthus barbatus", "Dianthus caryophyllus", "Phlox paniculata",
+    "Nigella damascena", "Cosmos bipinnatus", "Eryngium alpinum", "Cattleya labiata",
+    "Nerine bowdenii", "Astrantia major", "Curcuma alismatifolia", "Helleborus orientalis",
+    "Gerbera jamesonii", "Narcissus pseudonarcissus", "Gladiolus grandiflorus", "Euphorbia pulcherrima",
+    "Eustoma grandiflorum", "Erysimum cheiri", "Tagetes erecta", "Ranunculus acris",
+    "Leucanthemum vulgare", "Taraxacum officinale", "Petunia axillaris", "Viola tricolor",
+    "Primula vulgaris", "Helianthus annuus", "Pelargonium zonale", "Dahlia × hybrida",
+    "Gaura lindheimeri", "Geranium pratense", "Dahlia pinnata", "Dahlia variabilis",
+    "Cautleya spicata", "Anemone hupehensis", "Rudbeckia hirta", "Convolvulus cneorum",
+    "Eschscholzia californica", "Osteospermum ecklonis", "Crocus vernus", "Iris germanica",
+    "Anemone nemorosa", "Romneya coulteri", "Gazania rigens", "Rhododendron simsii",
+    "Nymphaea alba", "Rosa centifolia", "Datura stramonium", "Ipomoea purpurea",
+    "Passiflora caerulea", "Nelumbo nucifera", "Tricyrtis hirta", "Anthurium andraeanum",
+    "Plumeria rubra", "Clematis vitalba", "Hibiscus rosa-sinensis", "Aquilegia vulgaris",
+    "Adenium obesum", "Lavatera arborea", "Magnolia grandiflora", "Cyclamen persicum",
+    "Nasturtium officinale", "Canna indica", "Hippeastrum striatum", "Monarda didyma",
+    "Tillandsia recurvata", "Digitalis purpurea", "Bougainvillea glabra", "Camellia japonica",
+    "Malva sylvestris", "Ruellia simplex", "Bromelia pinguin", "Gaillardia pulchella",
+    "Campsis radicans", "Iris domestica"
+]
+
 MEAN = [0.485, 0.456, 0.406]
 STD  = [0.229, 0.224, 0.225]
 
 
+def get_git_commit_hash() -> str:
+    """Retorna o hash curto do commit git atual, ou 'unknown' se indisponível."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True
+        ).strip()
+        return out if out else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_environment_metadata(cfg: Config) -> Dict[str, Any]:
+    """Coleta metadados reais e verificáveis de hardware, sistema e bibliotecas."""
+    gpu_name = None
+    vram_gb = None
+    cuda_ver = torch.version.cuda
+    cudnn_ver = torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None
+    if torch.cuda.is_available():
+        try:
+            gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = round(torch.cuda.get_device_properties(0).total_memory / 1e9, 2)
+        except Exception:
+            pass
+
+    return {
+        "git_commit": get_git_commit_hash(),
+        "platform": platform.platform(),
+        "python_version": platform.python_version(),
+        "python_full": sys.version,
+        "torch_version": torch.__version__,
+        "torchvision_version": torchvision.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": cuda_ver,
+        "cudnn_version": cudnn_ver,
+        "gpu_name": gpu_name,
+        "gpu_vram_gb": vram_gb,
+        "cpu_count": os.cpu_count(),
+        "numpy_version": np.__version__,
+        "scipy_version": scipy.__version__,
+        "sklearn_version": sklearn.__version__,
+        "pandas_version": pd.__version__,
+        "matplotlib_version": matplotlib.__version__,
+        "umap_version": getattr(umap, "__version__", None) if umap is not None else None,
+        "device": cfg.device,
+        "use_amp": cfg.use_amp,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "seed": cfg.seed
+    }
+
+
 def denormalize(tensor: torch.Tensor, mean: List[float] = MEAN, std: List[float] = STD) -> torch.Tensor:
-  
+    """Reverte a normalização ImageNet de um tensor (3, H, W) para o intervalo [0, 1]."""
     t = tensor.clone().detach().cpu()
     for c in range(3):
         t[c] = t[c] * std[c] + mean[c]
@@ -132,7 +229,10 @@ def denormalize(tensor: torch.Tensor, mean: List[float] = MEAN, std: List[float]
 
 
 def get_transforms(cfg: Config) -> Tuple[transforms.Compose, transforms.Compose]:
- 
+    """
+    Constrói as esteiras de transformação para treino (estocástica) e validação/teste (determinística).
+    Preserva a razão de aspecto na avaliação com Resize(256, antialias=True) + CenterCrop(224).
+    """
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(cfg.img_size, scale=(0.7, 1.0), ratio=(0.85, 1.15), antialias=True),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -151,8 +251,13 @@ def get_transforms(cfg: Config) -> Tuple[transforms.Compose, transforms.Compose]
 
     return train_transform, val_test_transform
 
+
 class FlowerClassifier(nn.Module):
-   
+    """
+    Arquitetura baseada em MobileNetV2 (1280-d após Global Average Pooling)
+    acoplada a uma cabeça MLP regularizada:
+    Dropout(0.3) -> Linear(1280, 512) -> BatchNorm1d(512) -> ReLU -> Dropout(0.2) -> Linear(512, num_classes).
+    """
     def __init__(self, backbone: nn.Module, num_classes: int = 102):
         super().__init__()
         self.backbone = backbone
@@ -172,25 +277,35 @@ class FlowerClassifier(nn.Module):
         return self.head(pooled)
 
 
-def compute_classification_metrics(y_true: np.ndarray, y_probs: np.ndarray, k: int = 5, labels: Optional[np.ndarray] = None) -> Dict[str, float]:
-   
+def compute_classification_metrics(y_true: np.ndarray, y_probs: np.ndarray, k: int = 5,
+                                   labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
+    """Calcula Top-1, Top-k, Macro F1-Score e contagens exatas de acertos."""
     y_preds = np.argmax(y_probs, axis=1)
     n_classes = y_probs.shape[1]
     if labels is None:
         labels = np.arange(n_classes)
-        
+
+    eff_k = min(k, n_classes)
+    n_total = int(len(y_true))
+    n_correct = int(np.sum(y_preds == y_true))
     top1 = float(accuracy_score(y_true, y_preds)) * 100.0
-    topk = float(top_k_accuracy_score(y_true, y_probs, k=k, labels=labels)) * 100.0
+    topk = float(top_k_accuracy_score(y_true, y_probs, k=eff_k, labels=labels)) * 100.0
     f1_macro = float(f1_score(y_true, y_preds, average="macro", zero_division=0)) * 100.0
     return {
         "top1": top1,
         f"top{k}": topk,
-        "f1_macro": f1_macro
+        "f1_macro": f1_macro,
+        "n_correct": n_correct,
+        "n_total": n_total
     }
 
 
 def compute_contingency_table(y_true: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray) -> Tuple[int, int]:
-  
+    """
+    Calcula as contagens discordantes pareadas entre o Modelo A (referência) e o Modelo B (comparado):
+    b = casos em que A errou e B acertou;
+    c = casos em que A acertou e B errou.
+    """
     corr_a = (preds_a == y_true)
     corr_b = (preds_b == y_true)
     b = int(np.sum(~corr_a & corr_b))
@@ -199,23 +314,25 @@ def compute_contingency_table(y_true: np.ndarray, preds_a: np.ndarray, preds_b: 
 
 
 def compute_mcnemar(b: int, c: int, correction: bool = True) -> Dict[str, Any]:
-  
+    """Teste de McNemar com correção de continuidade de Edwards (gl = 1)."""
     total_disc = b + c
     if total_disc == 0:
         return {"b": b, "c": c, "chi2": 0.0, "df": 1, "p_value": 1.0, "significant_005": False}
-    
+
     diff = abs(b - c)
     if correction:
         numerator = max(0.0, diff - 1.0) ** 2
     else:
         numerator = float(diff ** 2)
-        
+
     chi2 = numerator / float(total_disc)
     p_val = float(stats.chi2.sf(chi2, df=1))
-    
+
     return {
-        "b": b,
-        "c": c,
+        "b": int(b),
+        "c": int(c),
+        "net_gain_b_minus_c": int(b - c),
+        "discordant_total": int(total_disc),
         "chi2": float(chi2),
         "df": 1,
         "p_value": p_val,
@@ -225,21 +342,22 @@ def compute_mcnemar(b: int, c: int, correction: bool = True) -> Dict[str, Any]:
 
 def compute_paired_bootstrap(y_true: np.ndarray, preds_a: np.ndarray, preds_b: np.ndarray,
                              n_boot: int = 1000, seed: int = 42) -> Dict[str, float]:
-   
+    """Bootstrap não-paramétrico pareado para a diferença de acurácia Top-1 (B - A) em pontos percentuais."""
     rng = np.random.RandomState(seed)
     n = len(y_true)
     corr_a = (preds_a == y_true).astype(float)
     corr_b = (preds_b == y_true).astype(float)
-    
+
     deltas = []
     for _ in range(n_boot):
         idx = rng.randint(0, n, size=n)
         acc_a = np.mean(corr_a[idx])
         acc_b = np.mean(corr_b[idx])
         deltas.append((acc_b - acc_a) * 100.0)
-        
+
     deltas = np.array(deltas)
     return {
+        "observed_delta_pp": float((np.mean(corr_b) - np.mean(corr_a)) * 100.0),
         "mean_delta": float(np.mean(deltas)),
         "ci_low": float(np.percentile(deltas, 2.5)),
         "ci_high": float(np.percentile(deltas, 97.5)),
@@ -249,18 +367,19 @@ def compute_paired_bootstrap(y_true: np.ndarray, preds_a: np.ndarray, preds_b: n
 
 def compute_bootstrap_ci(y_true: np.ndarray, preds: np.ndarray,
                          n_boot: int = 1000, seed: int = 42) -> Dict[str, float]:
-    
+    """Intervalo de Confiança Bootstrap de 95% (método dos percentis) para a acurácia de um modelo."""
     rng = np.random.RandomState(seed)
     n = len(y_true)
     corr = (preds == y_true).astype(float)
-    
+
     accs = []
     for _ in range(n_boot):
         idx = rng.randint(0, n, size=n)
         accs.append(np.mean(corr[idx]) * 100.0)
-        
+
     accs = np.array(accs)
     return {
+        "observed_acc": float(np.mean(corr) * 100.0),
         "mean_acc": float(np.mean(accs)),
         "ci_low": float(np.percentile(accs, 2.5)),
         "ci_high": float(np.percentile(accs, 97.5)),
@@ -269,24 +388,27 @@ def compute_bootstrap_ci(y_true: np.ndarray, preds: np.ndarray,
 
 
 def compute_calibration_metrics(y_true: np.ndarray, y_probs: np.ndarray, n_bins: int = 10) -> Dict[str, Any]:
-  
+    """
+    Calcula Expected Calibration Error (ECE), Brier Score multiclasse e Negative Log-Likelihood (NLL).
+    Inclui todas as amostras (inclusive confiança == 1.0 no último bin) e preserva bins vazios como None.
+    """
     confidences = np.max(y_probs, axis=1)
     predictions = np.argmax(y_probs, axis=1)
     accuracies = (predictions == y_true).astype(float)
     n_samples = len(y_true)
-    
+
     bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-    
+
     # Atribuição aos bins garantindo que 1.0 seja alocado no último bin
     bin_indices = np.digitize(confidences, bin_edges) - 1
     bin_indices = np.clip(bin_indices, 0, n_bins - 1)
-    
+
     bin_accs = []
     bin_confs = []
     bin_counts = []
     ece = 0.0
-    
+
     for b in range(n_bins):
         mask = (bin_indices == b)
         count = int(np.sum(mask))
@@ -300,17 +422,17 @@ def compute_calibration_metrics(y_true: np.ndarray, y_probs: np.ndarray, n_bins:
         else:
             bin_accs.append(None)  # None indica bin vazio (evita viés visual de acc=0)
             bin_confs.append(float(bin_centers[b]))
-            
+
     # Multiclass Brier Score: 1/N sum_i sum_c (p_ic - y_ic)^2
     y_one_hot = np.zeros_like(y_probs)
     y_one_hot[np.arange(n_samples), y_true] = 1.0
     brier = float(np.mean(np.sum((y_probs - y_one_hot) ** 2, axis=1)))
-    
+
     # Negative Log-Likelihood (NLL)
     eps = 1e-12
     p_true = y_probs[np.arange(n_samples), y_true]
     nll = float(-np.mean(np.log(np.clip(p_true, eps, 1.0))))
-    
+
     return {
         "ece": float(ece),
         "ece_percentage": float(ece * 100.0),
@@ -319,12 +441,100 @@ def compute_calibration_metrics(y_true: np.ndarray, y_probs: np.ndarray, n_bins:
         "bin_centers": bin_centers.tolist(),
         "bin_accs": bin_accs,
         "bin_confs": bin_confs,
-        "bin_counts": bin_counts
+        "bin_counts": bin_counts,
+        "total_counted": int(sum(bin_counts))
     }
+
+
+def recalculate_metrics_from_npz(npz_path: str, n_boot: int = 1000,
+                                 seed: int = 42, n_bins: int = 10) -> Dict[str, Any]:
+    """
+    Recalcula de forma determinística e independente todas as métricas de classificação,
+    calibração, intervalos bootstrap e testes de McNemar diretamente do arquivo predictions.npz.
+    """
+    data = np.load(npz_path)
+    y_true = data["y_true"]
+    probs_p1 = data["probs_p1"]
+    preds_p1 = np.argmax(probs_p1, axis=1)
+    probs_ft = data["probs_ft"]
+    preds_ft = np.argmax(probs_ft, axis=1)
+
+    metrics_p1 = compute_classification_metrics(y_true, probs_p1)
+    metrics_ft = compute_classification_metrics(y_true, probs_ft)
+
+    b_ft, c_ft = compute_contingency_table(y_true, preds_p1, preds_ft)
+    mcnemar_ft = compute_mcnemar(b_ft, c_ft, correction=True)
+    boot_delta_ft = compute_paired_bootstrap(y_true, preds_p1, preds_ft, n_boot=n_boot, seed=seed)
+    boot_ci_p1 = compute_bootstrap_ci(y_true, preds_p1, n_boot=n_boot, seed=seed)
+    boot_ci_ft = compute_bootstrap_ci(y_true, preds_ft, n_boot=n_boot, seed=seed)
+    calib_ft = compute_calibration_metrics(y_true, probs_ft, n_bins=n_bins)
+
+    out: Dict[str, Any] = {
+        "n_samples": int(len(y_true)),
+        "metrics_p1": metrics_p1,
+        "metrics_ft": metrics_ft,
+        "delta_ft_vs_p1_unrounded_pp": float(metrics_ft["top1"] - metrics_p1["top1"]),
+        "delta_ft_vs_p1_rounded_pp": round(metrics_ft["top1"], 2) - round(metrics_p1["top1"], 2),
+        "mcnemar_ft_vs_p1": mcnemar_ft,
+        "boot_delta_ft_vs_p1": boot_delta_ft,
+        "boot_ci_p1": boot_ci_p1,
+        "boot_ci_ft": boot_ci_ft,
+        "calibration_ft": calib_ft,
+        "classics": {}
+    }
+
+    if "probs_tta" in data and data["probs_tta"].size > 0:
+        probs_tta = data["probs_tta"]
+        preds_tta = np.argmax(probs_tta, axis=1)
+        metrics_tta = compute_classification_metrics(y_true, probs_tta)
+        b_tta_ft, c_tta_ft = compute_contingency_table(y_true, preds_ft, preds_tta)
+        b_tta_p1, c_tta_p1 = compute_contingency_table(y_true, preds_p1, preds_tta)
+        out["metrics_tta"] = metrics_tta
+        out["mcnemar_tta_vs_ft"] = compute_mcnemar(b_tta_ft, c_tta_ft, correction=True)
+        out["mcnemar_tta_vs_p1"] = compute_mcnemar(b_tta_p1, c_tta_p1, correction=True)
+        out["boot_delta_tta_vs_ft"] = compute_paired_bootstrap(y_true, preds_ft, preds_tta, n_boot=n_boot, seed=seed)
+        out["boot_delta_tta_vs_p1"] = compute_paired_bootstrap(y_true, preds_p1, preds_tta, n_boot=n_boot, seed=seed)
+        out["boot_ci_tta"] = compute_bootstrap_ci(y_true, preds_tta, n_boot=n_boot, seed=seed)
+
+    classic_keys = [
+        ("KNN (k=5)", "preds_classic_knn", "probs_classic_knn"),
+        ("Random Forest (100)", "preds_classic_rf", "probs_classic_rf"),
+        ("Regressão Logística L2", "preds_classic_lr", "probs_classic_lr"),
+    ]
+    for name, pred_key, prob_key in classic_keys:
+        if pred_key in data and data[pred_key].size > 0:
+            c_preds = data[pred_key]
+            c_acc = float(accuracy_score(y_true, c_preds)) * 100.0
+            c_f1 = float(f1_score(y_true, c_preds, average="macro", zero_division=0)) * 100.0
+            c_top5 = None
+            if prob_key in data and data[prob_key].size > 0:
+                c_probs = data[prob_key]
+                eff_k = min(5, c_probs.shape[1])
+                c_top5 = float(top_k_accuracy_score(y_true, c_probs, k=eff_k, labels=np.arange(c_probs.shape[1]))) * 100.0
+            # Comparação onde Fase 1 é referência (A = P1, B = Clássico) e vice-versa
+            b_vs_p1, c_vs_p1 = compute_contingency_table(y_true, preds_p1, c_preds)
+            b_vs_ft, c_vs_ft = compute_contingency_table(y_true, preds_ft, c_preds)
+            out["classics"][name] = {
+                "top1": c_acc,
+                "top5": c_top5,
+                "f1_macro": c_f1,
+                "n_correct": int(np.sum(c_preds == y_true)),
+                "n_total": int(len(y_true)),
+                "delta_vs_p1_pp": float(c_acc - metrics_p1["top1"]),
+                "delta_vs_ft_pp": float(c_acc - metrics_ft["top1"]),
+                "mcnemar_vs_p1": compute_mcnemar(b_vs_p1, c_vs_p1, correction=True),
+                "mcnemar_vs_ft": compute_mcnemar(b_vs_ft, c_vs_ft, correction=True),
+                "boot_ci": compute_bootstrap_ci(y_true, c_preds, n_boot=n_boot, seed=seed),
+                "boot_delta_vs_p1": compute_paired_bootstrap(y_true, preds_p1, c_preds, n_boot=n_boot, seed=seed),
+                "boot_delta_vs_ft": compute_paired_bootstrap(y_true, preds_ft, c_preds, n_boot=n_boot, seed=seed),
+            }
+
+    return out
+
 
 @torch.no_grad()
 def extract_embeddings(model_bb: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-   
+    """Extrai vetores latentes 1280-d do backbone MobileNetV2 em modo estritamente determinístico (eval)."""
     model_bb.eval()
     feats, labs = [], []
     for imgs, lbls in loader:
@@ -342,25 +552,25 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module,
               scaler: Optional[GradScaler] = None,
               device: torch.device = torch.device("cpu"),
               is_phase1: bool = False) -> Tuple[float, float]:
-   
+    """Executa uma época de treino ou avaliação. Em is_phase1=True, mantém model.backbone.eval()."""
     is_train = optimizer is not None
     model.train() if is_train else model.eval()
     if is_train and is_phase1:
         # Congelamento estrito de BatchNorm no backbone durante a Fase 1
         model.backbone.eval()
-        
+
     loss_sum, correct, total = 0.0, 0, 0
     use_amp = (device.type == "cuda")
-    
+
     for imgs, lbls in loader:
         imgs, lbls = imgs.to(device, non_blocking=True), lbls.to(device, non_blocking=True)
         if is_train:
             optimizer.zero_grad(set_to_none=True)
-            
+
         with autocast("cuda", enabled=use_amp):
             logits = model(imgs)
             loss = criterion(logits, lbls)
-            
+
         if is_train:
             if scaler is not None and use_amp:
                 scaler.scale(loss).backward()
@@ -369,21 +579,21 @@ def run_epoch(model: nn.Module, loader: DataLoader, criterion: nn.Module,
             else:
                 loss.backward()
                 optimizer.step()
-                
+
         loss_sum += loss.item() * imgs.size(0)
         correct  += (logits.argmax(1) == lbls).sum().item()
         total    += imgs.size(0)
-        
+
     return loss_sum / max(1, total), correct / max(1, total)
 
 
 @torch.no_grad()
 def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
-    
+    """Avalia o modelo sobre todas as amostras do loader, retornando probabilidades Softmax e rótulos reais."""
     model.eval()
     probs_list, labels_list = [], []
     use_amp = (device.type == "cuda")
-    
+
     for imgs, lbls in loader:
         imgs = imgs.to(device, non_blocking=True)
         with autocast("cuda", enabled=use_amp):
@@ -391,7 +601,7 @@ def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -
             probs = torch.softmax(logits.float(), dim=1)
         probs_list.append(probs.cpu())
         labels_list.append(lbls)
-        
+
     all_probs = torch.cat(probs_list).numpy()
     all_labels = torch.cat(labels_list).numpy()
     return all_probs, all_labels
@@ -399,11 +609,15 @@ def evaluate_model(model: nn.Module, loader: DataLoader, device: torch.device) -
 
 @torch.no_grad()
 def evaluate_tta_full(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[np.ndarray, np.ndarray]:
-   
+    """
+    Executa Test-Time Augmentation (TTA) sobre 100% das imagens do loader (exatamente uma vez por imagem),
+    calculando a média aritmética simples das probabilidades Softmax entre a imagem original e sua
+    reflexão horizontal especular: P_TTA(x) = 0.5 * P(x) + 0.5 * P(Flip(x)).
+    """
     model.eval()
     probs_list, labels_list = [], []
     use_amp = (device.type == "cuda")
-    
+
     for imgs, lbls in loader:
         imgs = imgs.to(device, non_blocking=True)
         with autocast("cuda", enabled=use_amp):
@@ -413,13 +627,14 @@ def evaluate_tta_full(model: nn.Module, loader: DataLoader, device: torch.device
             p_avg = (p_std + p_flip) / 2.0
         probs_list.append(p_avg.cpu())
         labels_list.append(lbls)
-        
+
     all_probs = torch.cat(probs_list).numpy()
     all_labels = torch.cat(labels_list).numpy()
     return all_probs, all_labels
 
+
 class GradCAM:
-    
+    """Implementação do Grad-CAM (Selvaraju et al., 2017) sobre a camada convolucional alvo."""
     def __init__(self, model: nn.Module, target_layer: nn.Module):
         self.model = model
         self.target_layer = target_layer
@@ -434,11 +649,12 @@ class GradCAM:
     def _bwd_hook(self, module, grad_in, grad_out):
         self.gradients = grad_out[0].detach()
 
-    def generate(self, img_tensor: torch.Tensor, device: torch.device, class_idx: Optional[int] = None) -> Tuple[np.ndarray, int, float]:
+    def generate(self, img_tensor: torch.Tensor, device: torch.device,
+                 class_idx: Optional[int] = None) -> Tuple[np.ndarray, int, float]:
         self.model.eval()
         self.model.zero_grad()
         x = img_tensor.unsqueeze(0).to(device).requires_grad_(True)
-        
+
         with torch.enable_grad():
             feats = self.model.backbone.features(x)
             pooled = nn.functional.adaptive_avg_pool2d(feats, 1).flatten(1)
@@ -456,68 +672,76 @@ class GradCAM:
         pred_prob = torch.softmax(logits, dim=1)[0, class_idx].item()
         return cam, class_idx, pred_prob
 
+
 def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Dataset,
-                       model: Optional[FlowerClassifier] = None, device: Optional[torch.device] = None):
-    """Gera e salva as 11 figuras com rigor estético e rastreabilidade numérica."""
+                       model: Optional[FlowerClassifier] = None, device: Optional[torch.device] = None,
+                       demo_dataset: Optional[Dataset] = None):
+    """
+    Gera e salva as 11 figuras técnicas em 300 DPI com rastreabilidade numérica.
+    Se demo_dataset (ex.: train_eval_dataset) for fornecido, utiliza-o para as figuras ilustrativas
+    F01, F02 e F03 para evitar exploração desnecessária da partição de teste.
+    """
     os.makedirs(plots_dir, exist_ok=True)
     sns.set_theme(style="whitegrid", palette="muted")
-    
+    vis_dataset = demo_dataset if demo_dataset is not None else test_dataset
 
-    # F01: Grid de Amostras Reais (3x6)
-
+    # F01: Grid de Amostras Reais (3x6) com nome popular e binomial
     print("[1/11] Gerando F01: Grid de Amostras Reais (Oxford Flowers-102)...")
-    fig, axes = plt.subplots(3, 6, figsize=(18, 9), dpi=300)
-    indices = np.linspace(0, len(test_dataset) - 1, 18, dtype=int)
+    fig, axes = plt.subplots(3, 6, figsize=(18, 9.5), dpi=300)
+    indices = np.linspace(0, len(vis_dataset) - 1, 18, dtype=int)
     for ax, idx in zip(axes.ravel(), indices):
-        img_t, lbl = test_dataset[idx]
+        img_t, lbl = vis_dataset[idx]
         img_np = denormalize(img_t).permute(1, 2, 0).numpy()
         ax.imshow(img_np)
         c_name = FLOWER_NAMES[lbl] if lbl < len(FLOWER_NAMES) else f"Cl.{lbl}"
-        ax.set_title(f"Cl.{lbl}: {c_name}", fontsize=8.5, fontweight="bold", pad=4)
+        s_name = FLOWER_SCIENTIFIC_NAMES[lbl] if lbl < len(FLOWER_SCIENTIFIC_NAMES) else ""
+        title_str = f"Cl.{lbl}: {c_name}\n({s_name})" if s_name else f"Cl.{lbl}: {c_name}"
+        ax.set_title(title_str, fontsize=7.8, fontweight="bold", pad=3)
         ax.axis("off")
-    fig.suptitle("Figura 1 — Variabilidade Morfológica e Diversidade Fenotípica Real no Dataset Oxford Flowers-102",
-                 fontsize=14, fontweight="bold", y=0.98)
+    fig.suptitle("Figura 1 — Variabilidade Morfológica e Diversidade Fenotípica no Dataset Oxford Flowers-102",
+                 fontsize=14, fontweight="bold", y=0.99)
     plt.tight_layout()
     fig.savefig(os.path.join(plots_dir, "F01_amostras_dataset.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-    # F02: Pipeline de Aumento de Dados
-
-    print("[2/11] Gerando F02: Pipeline de Aumento de Dados...")
-    sample_raw_img, sample_lbl = test_dataset[10]
+    # F02: Demonstração Ilustrativa das Transformações de Aumento de Dados (parâmetros reais do treino)
+    print("[2/11] Gerando F02: Demonstração do Pipeline de Aumento de Dados...")
+    sample_idx = min(10, len(vis_dataset) - 1)
+    sample_raw_img, sample_lbl = vis_dataset[sample_idx]
     sample_np = denormalize(sample_raw_img).permute(1, 2, 0).numpy()
-    t_crop = transforms.RandomResizedCrop(224, scale=(0.7, 0.75), ratio=(1.0, 1.0))
-    t_rot  = transforms.RandomRotation(degrees=(25, 25))
-    t_jit  = transforms.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.35)
-    
-    img_crop = t_crop(sample_raw_img)
-    img_flip = torch.flip(sample_raw_img, dims=[2])
-    img_rot  = t_rot(sample_raw_img)
-    img_jit  = t_jit(sample_raw_img)
+    torch.manual_seed(42)
+    t_crop = transforms.RandomResizedCrop(224, scale=(0.7, 1.0), ratio=(0.85, 1.15), antialias=True)
+    t_rot  = transforms.RandomRotation(degrees=(20, 20))
+    t_jit  = transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15)
+
+    # Aplica sobre imagem desnormalizada [0, 1] para fidelidade fotométrica no ColorJitter
+    sample_unnorm = denormalize(sample_raw_img)
+    img_crop = t_crop(sample_unnorm)
+    img_flip = torch.flip(sample_unnorm, dims=[2])
+    img_rot  = t_rot(sample_unnorm)
+    img_jit  = t_jit(sample_unnorm)
     img_norm = (sample_raw_img - sample_raw_img.min()) / (sample_raw_img.max() - sample_raw_img.min() + 1e-8)
-    
+
     aug_panels = [
-        ("Original\n(224×224)", sample_np),
-        ("RandomResizedCrop\n(escala=0.72)", denormalize(img_crop).permute(1, 2, 0).numpy()),
-        ("HorizontalFlip\n(p = 0.50)", denormalize(img_flip).permute(1, 2, 0).numpy()),
-        ("RandomRotation\n(θ = +25°)", denormalize(img_rot).permute(1, 2, 0).numpy()),
-        ("ColorJitter\n(Perturbação Solar)", denormalize(img_jit).permute(1, 2, 0).numpy()),
-        ("Normalizado\n(ImageNet Mean/Std)", img_norm.permute(1, 2, 0).numpy())
+        ("Entrada Base\n(224×224)", sample_np),
+        ("RandomResizedCrop\n(escala∈[0.7, 1.0])", img_crop.permute(1, 2, 0).numpy()),
+        ("RandomHorizontalFlip\n(p = 0.50)", img_flip.permute(1, 2, 0).numpy()),
+        ("RandomRotation\n(|θ| ≤ 20°)", img_rot.permute(1, 2, 0).numpy()),
+        ("ColorJitter\n(±15% B/C/S)", img_jit.permute(1, 2, 0).numpy()),
+        ("Tensor Normalizado\n(ImageNet μ/σ)", img_norm.permute(1, 2, 0).numpy())
     ]
     fig, axes = plt.subplots(1, 6, figsize=(20, 3.8), dpi=300)
     for ax, (title, img_v) in zip(axes, aug_panels):
         ax.imshow(np.clip(img_v, 0.0, 1.0))
         ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
         ax.axis("off")
-    fig.suptitle("Figura 2 — Pipeline de Pré-processamento e Aumento Estocástico Aplicado à Mesma Foto Real",
+    fig.suptitle("Figura 2 — Demonstração das Transformações Estocásticas de Treinamento e Normalização ImageNet",
                  fontsize=13, fontweight="bold", y=1.04)
     plt.tight_layout()
     fig.savefig(os.path.join(plots_dir, "F02_data_augmentation.png"), dpi=300, bbox_inches="tight")
     plt.close(fig)
 
-
     # F03: Hierarquia de Features e Filtros
-
     if model is not None and device is not None:
         print("[3/11] Gerando F03: Filtros Convolucionais 3x3 e Ativações Reais da MobileNetV2...")
         fig = plt.figure(figsize=(16, 8.5), dpi=300)
@@ -564,12 +788,12 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F03_hierarquia_features.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
-    # F04: Projeção UMAP 2D dos Embeddings (Sem Famílias Artificiais)
-
-    if "umap_2d" in results:
+    # F04: Projeção Exploratória UMAP 2D dos Embeddings (Sem Famílias Artificiais)
+    if "umap_2d" in results and results["umap_2d"]:
         print("[4/11] Gerando F04: Projeção UMAP 2D dos Embeddings Reais (Sem Famílias Artificiais)...")
         umap_data = results["umap_2d"]
+        n_pts = len(umap_data.get("x", []))
+        split_used = umap_data.get("split_used", "amostra")
         fig, ax = plt.subplots(figsize=(10, 6.5), dpi=300)
         scatter = ax.scatter(
             umap_data["x"], umap_data["y"],
@@ -577,9 +801,11 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
             s=22, alpha=0.8, edgecolors="none"
         )
         cbar = plt.colorbar(scatter, ax=ax)
-        cbar.set_label("Índice da Classe Botânica (0 a 101)", fontsize=9, fontweight="bold")
-        ax.set_title("Figura 4 — Projeção UMAP 2D dos Embeddings Reais MobileNetV2 (1280-d)",
-                     fontsize=12, fontweight="bold", pad=12)
+        cbar.set_label("Índice Oficial da Classe Botânica (0 a 101)", fontsize=9, fontweight="bold")
+        ax.set_title(
+            f"Figura 4 — Projeção Exploratória UMAP 2D dos Embeddings MobileNetV2 (1280-d, N={n_pts}, partição={split_used})",
+            fontsize=11.5, fontweight="bold", pad=12
+        )
         ax.set_xlabel("Dimensão UMAP 1", fontsize=10, fontweight="bold")
         ax.set_ylabel("Dimensão UMAP 2", fontsize=10, fontweight="bold")
         ax.grid(True, linestyle="--", alpha=0.4)
@@ -587,9 +813,7 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F04_umap_embeddings.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F05: Desempenho Comparativo de Classificadores
-
     print("[5/11] Gerando F05: Desempenho Comparativo de Classificadores...")
     classic_res = results.get("models_summary", [])
     if classic_res:
@@ -615,9 +839,7 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F05_comparativo_classificadores.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F06: Curvas de Aprendizado da Fase 1
-
     hist_p1 = results.get("history_p1", {})
     if hist_p1 and "train_loss" in hist_p1:
         print("[6/11] Gerando F06: Curvas Reais de Aprendizado da Fase 1...")
@@ -645,9 +867,7 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F06_curvas_aprendizado_fase1.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F07: Curvas Consolidadas Fase 1 + Fine-Tuning
-
     hist_ft = results.get("history_ft", {})
     if hist_p1 and hist_ft and "train_loss" in hist_ft:
         print("[7/11] Gerando F07: Curvas Consolidadas Fase 1 + Fine-Tuning...")
@@ -684,9 +904,7 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F07_curvas_consolidadas_finetuning.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F08: Matriz de Confusão Global (102x102)
-
     if "confusion_matrix" in results:
         print("[8/11] Gerando F08: Matriz de Confusão Global (102x102)...")
         cm = np.array(results["confusion_matrix"])
@@ -701,15 +919,14 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F08_matriz_confusao.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F09: Interpretabilidade Visual Grad-CAM Real
-
     if model is not None and device is not None:
         print("[9/11] Gerando F09: Interpretabilidade Visual com Grad-CAM Real...")
         gradcam = GradCAM(model, model.backbone.features[-1])
         fig, axes = plt.subplots(2, 4, figsize=(14, 7), dpi=300)
         rng_cam = np.random.RandomState(42)
-        cam_indices = rng_cam.choice(len(test_dataset), size=4, replace=False)
+        n_cam = min(4, len(test_dataset))
+        cam_indices = rng_cam.choice(len(test_dataset), size=n_cam, replace=False)
         for col, idx in enumerate(cam_indices):
             img_t, true_lbl = test_dataset[idx]
             cam_map, pred_lbl, pred_prob = gradcam.generate(img_t, device)
@@ -736,21 +953,21 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F09_gradcam_interpretabilidade.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F10: Calibração Probabilística e Reliability Diagram
-
     if "calibration" in results:
         print("[10/11] Gerando F10: Calibração Probabilística e Diagrama de Confiabilidade...")
         calib = results["calibration"]
         probs_max = np.array(results.get("confidences_test", []))
-        correct_mask = np.array(results.get("correct_mask_test", []))
-        
+        correct_mask = np.array(results.get("correct_mask_test", []), dtype=bool)
+
         fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), dpi=300)
         if len(probs_max) > 0 and len(correct_mask) > 0:
-            axes[0].hist(probs_max[correct_mask], bins=25, alpha=0.75, color="#2CA02C",
-                         label=f"Corretas ({correct_mask.sum()})", density=True)
-            axes[0].hist(probs_max[~correct_mask], bins=25, alpha=0.75, color="#D62728",
-                         label=f"Incorretas ({(~correct_mask).sum()})", density=True)
+            if correct_mask.sum() > 0:
+                axes[0].hist(probs_max[correct_mask], bins=25, alpha=0.75, color="#2CA02C",
+                             label=f"Corretas ({correct_mask.sum()})", density=True)
+            if (~correct_mask).sum() > 0:
+                axes[0].hist(probs_max[~correct_mask], bins=25, alpha=0.75, color="#D62728",
+                             label=f"Incorretas ({(~correct_mask).sum()})", density=True)
             axes[0].set_title("Distribuição da Confiança Máxima Pmax", fontsize=11, fontweight="bold")
             axes[0].set_xlabel("Confiança Máxima Softmax P(y|X)", fontsize=9, fontweight="bold")
             axes[0].set_ylabel("Densidade", fontsize=9, fontweight="bold")
@@ -759,12 +976,11 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
 
         # Diagrama de Confiabilidade
         centers = calib["bin_centers"]
-        accs = [a if a is not None else np.nan for a in calib["bin_accs"]]
         axes[1].plot([0, 1], [0, 1], linestyle="--", color="#7F7F7F", linewidth=1.5, label="Calibração Perfeita (y = x)")
         valid_mask = [a is not None for a in calib["bin_accs"]]
         valid_centers = [c for c, v in zip(centers, valid_mask) if v]
         valid_accs = [a for a, v in zip(calib["bin_accs"], valid_mask) if v]
-        
+
         axes[1].bar(valid_centers, valid_accs, width=0.08, alpha=0.65, color="#1F77B4",
                     edgecolor="#1B365D", label=f"Acurácia Observada (ECE = {calib['ece_percentage']:.2f}%)")
         axes[1].plot(valid_centers, valid_accs, marker="o", color="#1B365D", linewidth=1.5)
@@ -783,9 +999,7 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         fig.savefig(os.path.join(plots_dir, "F10_calibracao_confiabilidade.png"), dpi=300, bbox_inches="tight")
         plt.close(fig)
 
-
     # F11: Análise de Erros por Classe e Pares Críticos
-
     if "confusion_matrix" in results:
         print("[11/11] Gerando F11: Desagregação por Classe e Pares Críticos de Confusão...")
         cm = np.array(results["confusion_matrix"])
@@ -816,16 +1030,17 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
         axes[0].legend(loc="lower right", fontsize=9)
         axes[0].grid(axis="y", linestyle="--", alpha=0.5)
 
-        pair_labels = [f"{FLOWER_NAMES[ci]} (Cl.{ci}) → {FLOWER_NAMES[cj]} (Cl.{cj})" for ci, cj, _ in top_pairs_real]
-        pair_counts = [count for _, _, count in top_pairs_real]
-        axes[1].barh(range(len(pair_labels)), pair_counts, color="#FF7F0E", edgecolor="#D35400", height=0.6)
-        axes[1].set_yticks(range(len(pair_labels)))
-        axes[1].set_yticklabels(pair_labels, fontsize=8, fontweight="bold")
-        axes[1].invert_yaxis()
+        if top_pairs_real:
+            pair_labels = [f"{FLOWER_NAMES[ci]} (Cl.{ci}) → {FLOWER_NAMES[cj]} (Cl.{cj})" for ci, cj, _ in top_pairs_real]
+            pair_counts = [count for _, _, count in top_pairs_real]
+            axes[1].barh(range(len(pair_labels)), pair_counts, color="#FF7F0E", edgecolor="#D35400", height=0.6)
+            axes[1].set_yticks(range(len(pair_labels)))
+            axes[1].set_yticklabels(pair_labels, fontsize=8, fontweight="bold")
+            axes[1].invert_yaxis()
+            for idx_b, c_val in enumerate(pair_counts):
+                axes[1].text(c_val + 0.3, idx_b, f"{c_val} amostras", va="center", fontsize=8, fontweight="bold", color="#1B365D")
         axes[1].set_xlabel("Frequência de Amostras de Teste Confundidas", fontsize=9, fontweight="bold")
         axes[1].set_title("B. Pares Taxonômicos com Maior Frequência de Confusão", fontsize=11, fontweight="bold")
-        for idx_b, c_val in enumerate(pair_counts):
-            axes[1].text(c_val + 0.3, idx_b, f"{c_val} amostras", va="center", fontsize=8, fontweight="bold", color="#1B365D")
         axes[1].grid(axis="x", linestyle="--", alpha=0.5)
 
         fig.suptitle("Figura 11 — Diagnóstico de Granularidade Fina: Desagregação por Classe e Pares de Confusão",
@@ -836,24 +1051,138 @@ def generate_all_plots(results: Dict[str, Any], plots_dir: str, test_dataset: Da
 
     print("[OK] Figuras geradas com sucesso em:", plots_dir)
 
+
+def run_smoke_test() -> Dict[str, Any]:
+    """
+    Executa um smoke test sintético rápido de ponta a ponta (sem necessidade de internet/GPU)
+    para validar extração de embeddings, classificadores clássicos, Fase 1 (BatchNorm congelado),
+    Fase 2 (Fine-Tuning), TTA, salvamento de predictions.npz e recálculo via recalculate_metrics_from_npz.
+    """
+    import tempfile
+    print("[SMOKE TEST] Iniciando validação sintética de ponta a ponta...")
+    seed_everything(42)
+
+    class SyntheticFlowers(Dataset):
+        def __init__(self, n_samples: int, num_classes: int = 6):
+            rng = np.random.RandomState(42)
+            self.imgs = torch.tensor(rng.randn(n_samples, 3, 224, 224), dtype=torch.float32)
+            self.labels = torch.tensor(np.arange(n_samples) % num_classes, dtype=torch.long)
+
+        def __len__(self):
+            return len(self.labels)
+
+        def __getitem__(self, idx):
+            return self.imgs[idx], int(self.labels[idx])
+
+    num_classes = 6
+    ds_train = SyntheticFlowers(24, num_classes=num_classes)
+    ds_val = SyntheticFlowers(12, num_classes=num_classes)
+    ds_test = SyntheticFlowers(24, num_classes=num_classes)
+
+    loader_tr = DataLoader(ds_train, batch_size=8, shuffle=True)
+    loader_tr_eval = DataLoader(ds_train, batch_size=8, shuffle=False)
+    loader_val = DataLoader(ds_val, batch_size=8, shuffle=False)
+    loader_te = DataLoader(ds_test, batch_size=8, shuffle=False)
+
+    device = torch.device("cpu")
+    backbone = models.mobilenet_v2(weights=None).to(device)
+    for p in backbone.parameters():
+        p.requires_grad = False
+    backbone.eval()
+
+    X_tr, y_tr = extract_embeddings(backbone, loader_tr_eval, device)
+    X_te, y_te = extract_embeddings(backbone, loader_te, device)
+
+    clf_lr = LogisticRegression(max_iter=100, C=1.0, random_state=42)
+    clf_lr.fit(X_tr.numpy(), y_tr.numpy())
+    preds_lr = clf_lr.predict(X_te.numpy())
+    probs_lr = clf_lr.predict_proba(X_te.numpy())
+
+    model = FlowerClassifier(backbone, num_classes=num_classes).to(device)
+    criterion = nn.CrossEntropyLoss()
+    opt_p1 = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3, weight_decay=1e-4)
+
+    # Verifica que running_mean e running_var permanecem idênticos na Fase 1
+    bn0 = model.backbone.features[0][1]
+    rm_before = bn0.running_mean.clone()
+    rv_before = bn0.running_var.clone()
+    run_epoch(model, loader_tr, criterion, opt_p1, None, device, is_phase1=True)
+    assert torch.equal(bn0.running_mean, rm_before), "Falha: running_mean alterou na Fase 1!"
+    assert torch.equal(bn0.running_var, rv_before), "Falha: running_var alterou na Fase 1!"
+
+    probs_p1, labels_real = evaluate_model(model, loader_te, device)
+
+    for name, param in model.backbone.named_parameters():
+        if any(k in name for k in ["features.16", "features.17", "features.18"]):
+            param.requires_grad = True
+    opt_ft = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=1e-4)
+    run_epoch(model, loader_tr, criterion, opt_ft, None, device, is_phase1=False)
+
+    probs_ft, _ = evaluate_model(model, loader_te, device)
+    probs_tta, _ = evaluate_tta_full(model, loader_te, device)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        npz_path = os.path.join(tmpdir, "predictions.npz")
+        np.savez_compressed(
+            npz_path,
+            y_true=labels_real,
+            probs_p1=probs_p1,
+            preds_p1=np.argmax(probs_p1, axis=1),
+            probs_ft=probs_ft,
+            preds_ft=np.argmax(probs_ft, axis=1),
+            probs_tta=probs_tta,
+            preds_classic_lr=preds_lr,
+            probs_classic_lr=probs_lr,
+        )
+        recalc = recalculate_metrics_from_npz(npz_path, n_boot=50, seed=42)
+        assert recalc["n_samples"] == 24
+        assert "Regressão Logística L2" in recalc["classics"]
+
+    print("[SMOKE TEST] Concluído com sucesso! Todas as etapas e invariâncias verificadas.")
+    return recalc
+
+
 def main():
     parser = argparse.ArgumentParser(description="Pipeline Auditado de Classificação Botânica (Oxford Flowers-102)")
     parser.add_argument("--base-dir", type=str, default="./resultados_botanico", help="Diretório base de saída")
     parser.add_argument("--data-dir", type=str, default="./data", help="Diretório do dataset Flowers-102")
+    parser.add_argument("--drive-backup-dir", type=str, default=None,
+                        help="Diretório opcional no Google Drive para cópia automática de todos os artefatos")
     parser.add_argument("--epochs-p1", type=int, default=8, help="Épocas na Fase 1")
     parser.add_argument("--epochs-p2", type=int, default=4, help="Épocas no Fine-Tuning")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size de treino")
     parser.add_argument("--seed", type=int, default=42, help="Semente de reprodutibilidade")
+    parser.add_argument("--umap-split", type=str, default="train_val", choices=["train_val", "test"],
+                        help="Partição usada para ajuste exploratório do UMAP (padrão: train_val)")
+    parser.add_argument("--umap-max-samples", type=int, default=1500,
+                        help="Número máximo de amostras para a projeção UMAP (padrão: 1500)")
     parser.add_argument("--no-tta", action="store_true", help="Desativa TTA na avaliação de teste")
+    parser.add_argument("--verify-only", type=str, default=None,
+                        help="Apenas recalcula e audita métricas a partir de um arquivo predictions.npz existente")
+    parser.add_argument("--smoke-test", action="store_true",
+                        help="Executa smoke test sintético rápido e encerra")
     args = parser.parse_args()
+
+    if args.smoke_test:
+        run_smoke_test()
+        return
+
+    if args.verify_only:
+        print(f"[AUDIT] Recalculando métricas diretamente de: {args.verify_only}")
+        recalc = recalculate_metrics_from_npz(args.verify_only, n_boot=1000, seed=args.seed)
+        print(json.dumps(recalc, indent=2, ensure_ascii=False))
+        return
 
     cfg = Config(
         seed=args.seed,
         base_dir=args.base_dir,
         data_dir=args.data_dir,
+        drive_backup_dir=args.drive_backup_dir,
         epochs_phase1=args.epochs_p1,
         epochs_phase2=args.epochs_p2,
         batch_size_train=args.batch_size,
+        umap_split=args.umap_split,
+        umap_max_samples=args.umap_max_samples,
         run_tta_test=not args.no_tta
     )
 
@@ -862,9 +1191,13 @@ def main():
     plots_dir = os.path.join(cfg.base_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
 
+    env_meta = get_environment_metadata(cfg)
+
     print("=" * 80)
     print("PIPELINE AUDITADO DE CLASSIFICAÇÃO BOTÂNICA (OXFORD FLOWERS-102)")
-    print(f"Dispositivo: {cfg.device}")
+    print(f"Commit Git: {env_meta['git_commit']}")
+    print(f"Dispositivo: {cfg.device} | GPU: {env_meta['gpu_name']} ({env_meta['gpu_vram_gb']} GB VRAM)")
+    print(f"Python: {env_meta['python_version']} | PyTorch: {env_meta['torch_version']} | CUDA: {env_meta['cuda_version']}")
     print(f"Diretório de Artefatos: {cfg.base_dir}")
     print(f"Diretório de Figuras: {plots_dir}")
     print("=" * 80)
@@ -893,62 +1226,92 @@ def main():
         p.requires_grad = False
     backbone.eval()
 
-    # 3. Extração Determinística de Embeddings para Modelos Clássicos
+    # 3. Extração Determinística de Embeddings para Modelos Clássicos e UMAP
     print("\n[INFO] Extraindo embeddings latentes de 1280-d de forma determinística...")
     X_train_emb, y_train_emb = extract_embeddings(backbone, train_eval_loader, torch.device(cfg.device))
+    X_val_emb,   y_val_emb   = extract_embeddings(backbone, val_loader,        torch.device(cfg.device))
     X_test_emb,  y_test_emb  = extract_embeddings(backbone, test_loader,       torch.device(cfg.device))
-    print(f"[OK] Embeddings extraídos: X_train={X_train_emb.shape}, X_test={X_test_emb.shape}")
+    print(f"[OK] Embeddings extraídos: X_train={X_train_emb.shape}, X_val={X_val_emb.shape}, X_test={X_test_emb.shape}")
 
-    # Projeção UMAP 2D
+    # Projeção Exploratória UMAP 2D
     umap_res = {}
     if umap is not None:
-        print("[INFO] Calculando projeção UMAP 2D sobre amostras do conjunto de teste...")
+        if cfg.umap_split == "train_val":
+            X_umap_pool = torch.cat([X_train_emb, X_val_emb], dim=0)
+            y_umap_pool = torch.cat([y_train_emb, y_val_emb], dim=0)
+            split_label = "train+val"
+        else:
+            X_umap_pool = X_test_emb
+            y_umap_pool = y_test_emb
+            split_label = "test"
+
         rng_u = np.random.RandomState(cfg.seed)
-        n_umap_samples = min(1500, len(X_test_emb))
-        idx_u = rng_u.choice(len(X_test_emb), size=n_umap_samples, replace=False)
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.3, n_components=2, random_state=cfg.seed)
-        X_test_2d = reducer.fit_transform(X_test_emb[idx_u].numpy())
+        n_umap_samples = min(cfg.umap_max_samples, len(X_umap_pool))
+        print(f"[INFO] Calculando projeção exploratória UMAP 2D sobre {n_umap_samples} amostras de {split_label}...")
+        idx_u = rng_u.choice(len(X_umap_pool), size=n_umap_samples, replace=False)
+        reducer = umap.UMAP(
+            n_neighbors=cfg.umap_n_neighbors,
+            min_dist=cfg.umap_min_dist,
+            n_components=2,
+            random_state=cfg.seed
+        )
+        X_2d = reducer.fit_transform(X_umap_pool[idx_u].numpy())
         umap_res = {
-            "x": X_test_2d[:, 0].tolist(),
-            "y": X_test_2d[:, 1].tolist(),
-            "labels": y_test_emb[idx_u].numpy().tolist()
+            "split_used": split_label,
+            "n_samples": int(n_umap_samples),
+            "total_pool_size": int(len(X_umap_pool)),
+            "n_neighbors": cfg.umap_n_neighbors,
+            "min_dist": cfg.umap_min_dist,
+            "random_state": cfg.seed,
+            "x": X_2d[:, 0].tolist(),
+            "y": X_2d[:, 1].tolist(),
+            "labels": y_umap_pool[idx_u].numpy().tolist()
         }
 
     # 4. Benchmarking de Classificadores Clássicos
-    print("\n[INFO] Treinando classificadores clássicos sobre embeddings de treino...")
+    print("\n[INFO] Treinando classificadores clássicos sobre embeddings determinísticos de treino...")
     classic_models = [
         ("KNN (k=5)", KNeighborsClassifier(n_neighbors=5, metric="euclidean")),
         ("Random Forest (100)", RandomForestClassifier(n_estimators=100, max_depth=20, random_state=cfg.seed, n_jobs=-1)),
         ("Regressão Logística L2", LogisticRegression(max_iter=300, C=1.0, random_state=cfg.seed))
     ]
-    classic_predictions = {}
-    classic_summary = []
+    classic_predictions: Dict[str, np.ndarray] = {}
+    classic_probabilities: Dict[str, np.ndarray] = {}
+    classic_summary: List[Dict[str, Any]] = []
 
+    y_test_np = y_test_emb.numpy()
     for name, clf in classic_models:
         t0 = time.time()
         clf.fit(X_train_emb.numpy(), y_train_emb.numpy())
-        preds = clf.predict(X_test_emb.numpy())
-        classic_predictions[name] = preds
-        acc = float(accuracy_score(y_test_emb.numpy(), preds)) * 100.0
-        f1 = float(f1_score(y_test_emb.numpy(), preds, average="macro", zero_division=0)) * 100.0
+        probs_c = clf.predict_proba(X_test_emb.numpy())
+        preds_c = np.argmax(probs_c, axis=1)
+        classic_predictions[name] = preds_c
+        classic_probabilities[name] = probs_c
+        c_metrics = compute_classification_metrics(y_test_np, probs_c)
         fit_time = time.time() - t0
         classic_summary.append({
             "model_name": name,
-            "top1": acc,
-            "f1_macro": f1,
+            "top1": c_metrics["top1"],
+            "top5": c_metrics["top5"],
+            "f1_macro": c_metrics["f1_macro"],
+            "n_correct": c_metrics["n_correct"],
+            "n_total": c_metrics["n_total"],
             "time_s": fit_time
         })
-        print(f"   {name:<24} | Top-1: {acc:6.2f}% | Macro F1: {f1:6.2f}% | Tempo: {fit_time:4.1f}s")
+        print(
+            f"   {name:<24} | Top-1: {c_metrics['top1']:6.2f}% ({c_metrics['n_correct']}/{c_metrics['n_total']}) "
+            f"| Top-5: {c_metrics['top5']:6.2f}% | Macro F1: {c_metrics['f1_macro']:6.2f}% | Tempo: {fit_time:4.1f}s"
+        )
 
     # 5. Modelo Neural End-to-End: Fase 1 (Cabeça MLP, Backbone Congelado)
-    print("\n[INFO] Iniciando Treinamento da Fase 1 (Cabeça MLP, Backbone Congelado)...")
+    print("\n[INFO] Iniciando Treinamento da Fase 1 (Cabeça MLP, Backbone Congelado com BatchNorm em eval)...")
     model = FlowerClassifier(backbone, cfg.num_classes).to(cfg.device)
     criterion = nn.CrossEntropyLoss()
     scaler = GradScaler("cuda", enabled=cfg.use_amp)
     optimizer_p1 = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                                lr=cfg.lr_phase1, weight_decay=cfg.weight_decay)
 
-    history_p1 = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    history_p1 = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "best_epoch": 1}
     best_val_loss_p1 = float("inf")
     best_state_p1 = None
 
@@ -961,22 +1324,37 @@ def main():
         history_p1["val_loss"].append(vl_loss);   history_p1["val_acc"].append(vl_acc)
         if vl_loss < best_val_loss_p1:
             best_val_loss_p1 = vl_loss
+            history_p1["best_epoch"] = epoch
             best_state_p1 = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         print(f"   [Fase 1] Época {epoch:02d}/{cfg.epochs_phase1:02d} | Train: Loss={tr_loss:.4f}, Acc={tr_acc*100:5.2f}% | Val: Loss={vl_loss:.4f}, Acc={vl_acc*100:5.2f}% ({time.time()-t0_ep:.1f}s)")
 
     if best_state_p1 is not None:
         model.load_state_dict(best_state_p1)
 
+    checkpoint_p1_path = os.path.join(cfg.base_dir, "checkpoint_best_p1.pth")
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": asdict(cfg),
+        "best_val_loss_p1": best_val_loss_p1,
+        "best_epoch_p1": history_p1["best_epoch"]
+    }, checkpoint_p1_path)
+
     print("\n[INFO] Avaliando Fase 1 no conjunto de teste...")
     test_probs_p1, test_labels_real = evaluate_model(model, test_loader, torch.device(cfg.device))
     test_preds_p1 = np.argmax(test_probs_p1, axis=1)
     metrics_p1 = compute_classification_metrics(test_labels_real, test_probs_p1)
-    print(f"[OK] Desempenho Fase 1 (Teste): Top-1 = {metrics_p1['top1']:.2f}% | Top-5 = {metrics_p1['top5']:.2f}% | Macro F1 = {metrics_p1['f1_macro']:.2f}%")
+    print(
+        f"[OK] Desempenho Fase 1 (Teste): Top-1 = {metrics_p1['top1']:.2f}% ({metrics_p1['n_correct']}/{metrics_p1['n_total']}) "
+        f"| Top-5 = {metrics_p1['top5']:.2f}% | Macro F1 = {metrics_p1['f1_macro']:.2f}%"
+    )
 
     classic_summary.append({
         "model_name": "Cabeça MLP (Fase 1)",
         "top1": metrics_p1["top1"],
+        "top5": metrics_p1["top5"],
         "f1_macro": metrics_p1["f1_macro"],
+        "n_correct": metrics_p1["n_correct"],
+        "n_total": metrics_p1["n_total"],
         "time_s": 0.0
     })
 
@@ -987,14 +1365,14 @@ def main():
             param.requires_grad = True
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[INFO] Parâmetros treináveis após descongelamento cirúrgico: {trainable_params:,}")
+    print(f"[INFO] Parâmetros treináveis após descongelamento seletivo: {trainable_params:,}")
 
     optimizer_ft = optim.AdamW([
         {"params": [p for n, p in model.backbone.named_parameters() if p.requires_grad], "lr": cfg.lr_phase2_backbone},
         {"params": model.head.parameters(), "lr": cfg.lr_phase2_head}
     ], weight_decay=cfg.weight_decay)
 
-    history_ft = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+    history_ft = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "best_epoch": 1}
     best_val_loss_ft = float("inf")
     best_state_ft = None
 
@@ -1007,6 +1385,7 @@ def main():
         history_ft["val_loss"].append(vl_loss);   history_ft["val_acc"].append(vl_acc)
         if vl_loss < best_val_loss_ft:
             best_val_loss_ft = vl_loss
+            history_ft["best_epoch"] = epoch
             best_state_ft = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         print(f"   [Fine-Tuning] Época {epoch:02d}/{cfg.epochs_phase2:02d} | Train: Loss={tr_loss:.4f}, Acc={tr_acc*100:5.2f}% | Val: Loss={vl_loss:.4f}, Acc={vl_acc*100:5.2f}% ({time.time()-t0_ep:.1f}s)")
 
@@ -1020,51 +1399,88 @@ def main():
     cm = confusion_matrix(test_labels_real, test_preds_ft, labels=list(range(cfg.num_classes)))
 
     print(f"[OK] Desempenho Modelo Final (Teste):")
-    print(f"     Top-1 Accuracy: {metrics_ft['top1']:.2f}%")
+    print(f"     Top-1 Accuracy: {metrics_ft['top1']:.2f}% ({metrics_ft['n_correct']}/{metrics_ft['n_total']})")
     print(f"     Top-5 Accuracy: {metrics_ft['top5']:.2f}%")
     print(f"     Macro F1-Score: {metrics_ft['f1_macro']:.2f}%")
 
     classic_summary.append({
         "model_name": "MobileNetV2 (Fine-Tuning)",
         "top1": metrics_ft["top1"],
+        "top5": metrics_ft["top5"],
         "f1_macro": metrics_ft["f1_macro"],
+        "n_correct": metrics_ft["n_correct"],
+        "n_total": metrics_ft["n_total"],
         "time_s": 0.0
     })
 
     # 7. Test-Time Augmentation (TTA) no Teste Completo
     metrics_tta = None
     test_probs_tta = None
+    test_preds_tta = None
     if cfg.run_tta_test:
-        print("\n[INFO] Executando TTA no conjunto de teste completo (sem subamostragem ou piso forçado)...")
+        print("\n[INFO] Executando TTA (média imagem original + reflexão horizontal) no conjunto de teste completo...")
         test_probs_tta, _ = evaluate_tta_full(model, test_loader, torch.device(cfg.device))
         test_preds_tta = np.argmax(test_probs_tta, axis=1)
         metrics_tta = compute_classification_metrics(test_labels_real, test_probs_tta)
         delta_tta_real = metrics_tta["top1"] - metrics_ft["top1"]
-        print(f"[OK] TTA no teste completo: Top-1 = {metrics_tta['top1']:.2f}% (ΔTTA = {delta_tta_real:+.2f}%)")
+        print(
+            f"[OK] TTA no teste completo: Top-1 = {metrics_tta['top1']:.2f}% ({metrics_tta['n_correct']}/{metrics_tta['n_total']}) "
+            f"| Top-5 = {metrics_tta['top5']:.2f}% | Macro F1 = {metrics_tta['f1_macro']:.2f}% (ΔTTA vs FT = {delta_tta_real:+.2f} p.p.)"
+        )
 
     # 8. Validação Estatística Não-Paramétrica
     print("\n[INFO] Executando Testes Estatísticos Não-Paramétricos...")
-    
-    # McNemar entre Fase 1 e Fine-Tuning
+
+    # McNemar entre Fase 1 (A) e Fine-Tuning (B)
     b_ft, c_ft = compute_contingency_table(test_labels_real, test_preds_p1, test_preds_ft)
     mcnemar_ft = compute_mcnemar(b_ft, c_ft, correction=True)
-    
-    # Bootstrap pareado do delta de Fine-Tuning
+
+    # Bootstrap pareado do delta de Fine-Tuning (FT - P1)
     boot_delta_ft = compute_paired_bootstrap(test_labels_real, test_preds_p1, test_preds_ft,
                                              n_boot=cfg.n_bootstrap, seed=cfg.seed)
-    # Bootstrap IC 95% do modelo final
+    # Bootstrap IC 95% de cada modelo neural
+    boot_ci_p1 = compute_bootstrap_ci(test_labels_real, test_preds_p1,
+                                      n_boot=cfg.n_bootstrap, seed=cfg.seed)
     boot_ci_ft = compute_bootstrap_ci(test_labels_real, test_preds_ft,
                                       n_boot=cfg.n_bootstrap, seed=cfg.seed)
 
-    # McNemar para cada modelo clássico pareado contra a Fase 1
+    # McNemar e Bootstrap pareado para cada modelo clássico (A = Fase 1, B = Modelo Clássico)
     mcnemar_classics = {}
+    mcnemar_classics_vs_ft = {}
+    boot_ci_classics = {}
+    boot_delta_classics_vs_p1 = {}
+    boot_delta_classics_vs_ft = {}
     for name, c_preds in classic_predictions.items():
-        b_c, c_c = compute_contingency_table(test_labels_real, c_preds, test_preds_p1)
+        b_c, c_c = compute_contingency_table(test_labels_real, test_preds_p1, c_preds)
         mcnemar_classics[name] = compute_mcnemar(b_c, c_c, correction=True)
+        b_cf, c_cf = compute_contingency_table(test_labels_real, test_preds_ft, c_preds)
+        mcnemar_classics_vs_ft[name] = compute_mcnemar(b_cf, c_cf, correction=True)
+        boot_ci_classics[name] = compute_bootstrap_ci(test_labels_real, c_preds, n_boot=cfg.n_bootstrap, seed=cfg.seed)
+        boot_delta_classics_vs_p1[name] = compute_paired_bootstrap(test_labels_real, test_preds_p1, c_preds, n_boot=cfg.n_bootstrap, seed=cfg.seed)
+        boot_delta_classics_vs_ft[name] = compute_paired_bootstrap(test_labels_real, test_preds_ft, c_preds, n_boot=cfg.n_bootstrap, seed=cfg.seed)
+        mcn_info = mcnemar_classics[name]
+        print(
+            f"[*] McNemar ({name} vs P1): b={mcn_info['b']}, c={mcn_info['c']}, "
+            f"chi2={mcn_info['chi2']:.2f}, p={mcn_info['p_value']:.4e}"
+        )
 
-    print(f"[*] Delta Fine-Tuning: +{metrics_ft['top1'] - metrics_p1['top1']:.2f}%")
+    mcnemar_tta_vs_ft = None
+    mcnemar_tta_vs_p1 = None
+    boot_delta_tta_vs_ft = None
+    boot_ci_tta = None
+    if test_preds_tta is not None:
+        b_tf, c_tf = compute_contingency_table(test_labels_real, test_preds_ft, test_preds_tta)
+        mcnemar_tta_vs_ft = compute_mcnemar(b_tf, c_tf, correction=True)
+        b_tp, c_tp = compute_contingency_table(test_labels_real, test_preds_p1, test_preds_tta)
+        mcnemar_tta_vs_p1 = compute_mcnemar(b_tp, c_tp, correction=True)
+        boot_delta_tta_vs_ft = compute_paired_bootstrap(test_labels_real, test_preds_ft, test_preds_tta, n_boot=cfg.n_bootstrap, seed=cfg.seed)
+        boot_ci_tta = compute_bootstrap_ci(test_labels_real, test_preds_tta, n_boot=cfg.n_bootstrap, seed=cfg.seed)
+
+    delta_unrounded = metrics_ft["top1"] - metrics_p1["top1"]
+    delta_rounded = round(metrics_ft["top1"], 2) - round(metrics_p1["top1"], 2)
+    print(f"[*] Delta Fine-Tuning (não arredondado): {delta_unrounded:+.4f} p.p. ({delta_unrounded:+.2f}%) | (arredondado): {delta_rounded:+.2f} p.p.")
     print(f"[*] Bootstrap Pareado Δ(FT - P1): {boot_delta_ft['mean_delta']:+.2f}% [IC 95%: {boot_delta_ft['ci_low']:+.2f}%, {boot_delta_ft['ci_high']:+.2f}%]")
-    print(f"[*] Bootstrap IC 95% Final: [{boot_ci_ft['ci_low']:.2f}%, {boot_ci_ft['ci_high']:.2f}%]")
+    print(f"[*] Bootstrap IC 95% Final (FT): [{boot_ci_ft['ci_low']:.2f}%, {boot_ci_ft['ci_high']:.2f}%]")
     print(f"[*] McNemar Edwards (P1 vs FT): b={b_ft}, c={c_ft}, chi2={mcnemar_ft['chi2']:.2f}, p={mcnemar_ft['p_value']:.4e}")
 
     # 9. Calibração Probabilística
@@ -1074,60 +1490,80 @@ def main():
     print(f"[*] Brier Score: {calib_metrics['brier_score']:.4f}")
     print(f"[*] Negative Log-Likelihood (NLL): {calib_metrics['nll']:.4f}")
 
-    # 10. Tabela de Síntese Comparativa
+    # 10. Tabela de Síntese Comparativa (com valores científicos exatos)
     table_rows = []
-    # Clássicos
     for name in ["KNN (k=5)", "Random Forest (100)", "Regressão Logística L2"]:
-        c_acc = next(item["top1"] for item in classic_summary if item["model_name"] == name)
-        c_f1  = next(item["f1_macro"] for item in classic_summary if item["model_name"] == name)
+        c_item = next(item for item in classic_summary if item["model_name"] == name)
         mcn_c = mcnemar_classics[name]
-        p_str = f"p = {mcn_c['p_value']:.2e}" if mcn_c['p_value'] >= 1e-10 else "p < 10⁻¹⁰"
+        ci_c = boot_ci_classics[name]
         table_rows.append([
-            name, f"{c_acc:.2f}%", "—", f"{c_f1:.2f}%", "—",
-            f"{c_acc - metrics_p1['top1']:+.2f}%", p_str
+            name,
+            f"{c_item['top1']:.2f}%",
+            f"{c_item['top5']:.2f}%",
+            f"{c_item['f1_macro']:.2f}%",
+            f"[{ci_c['ci_low']:.2f}%, {ci_c['ci_high']:.2f}%]",
+            f"{c_item['top1'] - metrics_p1['top1']:+.2f}%",
+            f"b={mcn_c['b']}, c={mcn_c['c']}, chi2={mcn_c['chi2']:.2f}, p={mcn_c['p_value']:.2e}"
         ])
 
     # Fase 1
     table_rows.append([
-        "Cabeça MLP (Fase 1)", f"{metrics_p1['top1']:.2f}%", f"{metrics_p1['top5']:.2f}%",
-        f"{metrics_p1['f1_macro']:.2f}%", "—", "Referência", "Referência"
+        "Cabeça MLP (Fase 1)",
+        f"{metrics_p1['top1']:.2f}%",
+        f"{metrics_p1['top5']:.2f}%",
+        f"{metrics_p1['f1_macro']:.2f}%",
+        f"[{boot_ci_p1['ci_low']:.2f}%, {boot_ci_p1['ci_high']:.2f}%]",
+        "Referência",
+        "Referência"
     ])
 
     # Fine-Tuning
-    p_ft_str = f"p = {mcnemar_ft['p_value']:.2e}" if mcnemar_ft['p_value'] >= 1e-10 else "p < 10⁻¹⁰"
     table_rows.append([
-        "MobileNetV2 (Fine-Tuning)", f"{metrics_ft['top1']:.2f}%", f"{metrics_ft['top5']:.2f}%",
-        f"{metrics_ft['f1_macro']:.2f}%", f"[{boot_ci_ft['ci_low']:.2f}%, {boot_ci_ft['ci_high']:.2f}%]",
-        f"+{metrics_ft['top1'] - metrics_p1['top1']:.2f}%", p_ft_str
+        "MobileNetV2 (Fine-Tuning)",
+        f"{metrics_ft['top1']:.2f}%",
+        f"{metrics_ft['top5']:.2f}%",
+        f"{metrics_ft['f1_macro']:.2f}%",
+        f"[{boot_ci_ft['ci_low']:.2f}%, {boot_ci_ft['ci_high']:.2f}%]",
+        f"{metrics_ft['top1'] - metrics_p1['top1']:+.2f}%",
+        f"b={mcnemar_ft['b']}, c={mcnemar_ft['c']}, chi2={mcnemar_ft['chi2']:.2f}, p={mcnemar_ft['p_value']:.2e}"
     ])
 
     # TTA se disponível
-    if metrics_tta is not None:
+    if metrics_tta is not None and mcnemar_tta_vs_p1 is not None and boot_ci_tta is not None:
         table_rows.append([
-            "Com TTA (Flip Completo)", f"{metrics_tta['top1']:.2f}%", f"{metrics_tta['top5']:.2f}%",
-            f"{metrics_tta['f1_macro']:.2f}%", "—", f"+{metrics_tta['top1'] - metrics_p1['top1']:.2f}%", "—"
+            "Com TTA (Flip Horizontal Completo)",
+            f"{metrics_tta['top1']:.2f}%",
+            f"{metrics_tta['top5']:.2f}%",
+            f"{metrics_tta['f1_macro']:.2f}%",
+            f"[{boot_ci_tta['ci_low']:.2f}%, {boot_ci_tta['ci_high']:.2f}%]",
+            f"{metrics_tta['top1'] - metrics_p1['top1']:+.2f}%",
+            f"b={mcnemar_tta_vs_p1['b']}, c={mcnemar_tta_vs_p1['c']}, chi2={mcnemar_tta_vs_p1['chi2']:.2f}, p={mcnemar_tta_vs_p1['p_value']:.2e}"
         ])
 
     # 11. Consolidação e Persistência de Resultados
     results_dict = {
-        "metadata": {
-            "platform": platform.platform(),
-            "python_version": sys.version,
-            "torch_version": torch.__version__,
-            "cuda_available": torch.cuda.is_available(),
-            "device": cfg.device,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "seed": cfg.seed
-        },
+        "metadata": env_meta,
         "config": asdict(cfg),
+        "trainable_params_phase2": int(trainable_params),
         "models_summary": classic_summary,
         "metrics_p1": metrics_p1,
         "metrics_ft": metrics_ft,
         "metrics_tta": metrics_tta,
+        "delta_ft_vs_p1_unrounded_pp": float(delta_unrounded),
+        "delta_ft_vs_p1_rounded_pp": float(delta_rounded),
         "mcnemar_ft": mcnemar_ft,
         "mcnemar_classics": mcnemar_classics,
+        "mcnemar_classics_vs_ft": mcnemar_classics_vs_ft,
+        "mcnemar_tta_vs_ft": mcnemar_tta_vs_ft,
+        "mcnemar_tta_vs_p1": mcnemar_tta_vs_p1,
         "boot_delta_ft": boot_delta_ft,
+        "boot_delta_classics_vs_p1": boot_delta_classics_vs_p1,
+        "boot_delta_classics_vs_ft": boot_delta_classics_vs_ft,
+        "boot_delta_tta_vs_ft": boot_delta_tta_vs_ft,
+        "boot_ci_p1": boot_ci_p1,
         "boot_ci_ft": boot_ci_ft,
+        "boot_ci_tta": boot_ci_tta,
+        "boot_ci_classics": boot_ci_classics,
         "calibration": calib_metrics,
         "history_p1": history_p1,
         "history_ft": history_ft,
@@ -1153,9 +1589,13 @@ def main():
         probs_ft=test_probs_ft,
         preds_ft=test_preds_ft,
         probs_tta=test_probs_tta if test_probs_tta is not None else np.array([]),
+        preds_tta=test_preds_tta if test_preds_tta is not None else np.array([]),
         preds_classic_knn=classic_predictions.get("KNN (k=5)", np.array([])),
+        probs_classic_knn=classic_probabilities.get("KNN (k=5)", np.array([])),
         preds_classic_rf=classic_predictions.get("Random Forest (100)", np.array([])),
-        preds_classic_lr=classic_predictions.get("Regressão Logística L2", np.array([]))
+        probs_classic_rf=classic_probabilities.get("Random Forest (100)", np.array([])),
+        preds_classic_lr=classic_predictions.get("Regressão Logística L2", np.array([])),
+        probs_classic_lr=classic_probabilities.get("Regressão Logística L2", np.array([]))
     )
     print(f"[OK] Arrays de predições completas persistidos em: {predictions_path}")
 
@@ -1163,14 +1603,32 @@ def main():
     torch.save({
         "model_state_dict": model.state_dict(),
         "config": asdict(cfg),
-        "metrics_ft": metrics_ft
+        "metrics_ft": metrics_ft,
+        "best_val_loss_ft": best_val_loss_ft,
+        "best_epoch_ft": history_ft["best_epoch"]
     }, checkpoint_path)
     print(f"[OK] Checkpoint final persistido em: {checkpoint_path}")
 
     # 12. Renderização das 11 Figuras
     print("\n[INFO] Renderizando as 11 figuras técnicas a partir dos dados verificados...")
-    generate_all_plots(results_dict, plots_dir, test_dataset, model=model, device=torch.device(cfg.device))
+    generate_all_plots(
+        results_dict, plots_dir, test_dataset,
+        model=model, device=torch.device(cfg.device),
+        demo_dataset=train_eval_dataset
+    )
 
+    # 13. Cópia de segurança automática para o Google Drive (se configurado)
+    if cfg.drive_backup_dir:
+        os.makedirs(cfg.drive_backup_dir, exist_ok=True)
+        for fname in ["metrics.json", "predictions.npz", "checkpoint_best_p1.pth", "checkpoint_best_ft.pth"]:
+            src_f = os.path.join(cfg.base_dir, fname)
+            if os.path.exists(src_f):
+                shutil.copy2(src_f, os.path.join(cfg.drive_backup_dir, fname))
+        drive_plots = os.path.join(cfg.drive_backup_dir, "plots")
+        if os.path.exists(drive_plots):
+            shutil.rmtree(drive_plots)
+        shutil.copytree(plots_dir, drive_plots)
+        print(f"[OK] Backup completo de artefatos persistido em: {cfg.drive_backup_dir}")
 
     print("\n" + "=" * 80)
     print("EXECUÇÃO DO PIPELINE CONCLUÍDA COM TOTAL SUCESSO E RIGOR METODOLÓGICO!")

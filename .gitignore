@@ -33,11 +33,18 @@ env/
 .DS_Store
 Thumbs.db
 
-# Arquivos pessoais da autora (não versionar)
+# Arquivos pessoais (não versionar)
+.gitignore
+
+# Pastas locais e históricos
 historico_nao_validado/
-artigo_classificacao_botanica*.docx
-artigo_classificacao_botanica*.pdf
-resultados_botanico/*.docx
+historico_execucoes/
+fontes_artigo/
+fontes_artigos/
+resultados_botanico/
+
+# Documentos locais e materiais de apoio
+artigo_classificacao_botanica*
+executar_colab.ipynb
 gerar_artigo_academico.py
 AUDITORIA_METODOLOGICA.md
-
