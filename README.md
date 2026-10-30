@@ -9,7 +9,7 @@
 
 ---
 
-## 📖 O Desafio (Visão Geral)
+##  Visão Geral
 
 Classificar espécies botânicas por imagens é um desafio clássico de visão computacional devido a duas características naturais:
 1. **Alta variação na mesma espécie:** Diferenças de iluminação, idade da flor, ângulos e clima mudam drasticamente a aparência de uma mesma planta.
@@ -20,14 +20,14 @@ Para resolver este problema, utilizamos o dataset canônico **Oxford Flowers-102
 
 ---
 
-## ⚙️ Arquitetura e Pipeline
+##  Arquitetura e Pipeline
 
 A solução foi construída em duas fases de treinamento utilizando a rede **MobileNetV2**, otimizada para ser leve e eficiente.
 
 ```mermaid
 graph TD
     %% Configurações Globais
-    Config["⚙️ Configurações Iniciais<br>Seed: 42 | Otimização AMP | Lotes: Treino 32 / Teste 64"]
+    Config[" Configurações Iniciais<br>Seed: 42 | Otimização AMP | Lotes: Treino 32 / Teste 64"]
 
     %% Pipeline de Dados
     subgraph 1_Dados ["1. Pré-processamento e Augmentation"]
