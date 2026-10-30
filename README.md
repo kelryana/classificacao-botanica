@@ -68,22 +68,24 @@ graph TD
 
 ## Resultados Principais
 
-O modelo foi avaliado contra todo o conjunto de testes (6.149 imagens). O processo de **Fine-Tuning (Fase 2)** combinado com a técnica de **Test-Time Augmentation (TTA)** entregou os melhores resultados da nossa bateria de testes.
+O modelo foi avaliado sobre todo o conjunto oficial de teste ($6.149$ imagens, em GPU NVIDIA Tesla T4). Compararam-se classificadores clássicos sobre embeddings determinísticos congelados ($1.280$ dimensões) e o treinamento neural em dois estágios com **Fine-Tuning Seletivo (Fase 2)** e **Test-Time Augmentation (TTA)**:
 
 | Paradigma de Classificação | Acurácia (Top-1) | Acurácia (Top-5) | F1-Score (Macro) |
 | :--- | :---: | :---: | :---: |
-| **Random Forest (Baseline empírico)** | `61,99%` | - | `58,21%` |
-| **Fase 1** (Apenas Classificador) | `81,27%` | `95,06%` | `80,72%` |
-| **Fase 2** (Fine-Tuning Seletivo) | `84,19%` | `95,77%` | `83,91%` |
-| **Fase 2 + TTA** (Modelo Final) | **`84,81%`** | **`95,98%`** | **`84,49%`** |
+| **Random Forest** ($100$ árvores, prof. $20$) | `61,99%` | `80,96%` | `58,21%` |
+| **KNN** ($k = 5$, distância euclidiana) | `67,91%` | `87,67%` | `68,23%` |
+| **Regressão Logística L2** ($C = 1,0$, L-BFGS) | **`86,13%`** | **`96,16%`** | **`85,66%`** |
+| **Cabeça MLP — Fase 1** (`backbone.eval()`) | `81,79%` | `94,76%` | `81,30%` |
+| **MobileNetV2 — Fase 2** (Fine-Tuning `features.16-18`) | `83,48%` | `95,07%` | `82,55%` |
+| **Fase 2 + TTA** (Flip Horizontal Completo) | `83,80%` | `95,32%` | `82,78%` |
 
-*(Nota: O modelo linear de Regressão Logística isolado atingiu 86,13%, servindo como um benchmark teórico excelente para as representações extraídas).*
+*(Nota: A sondagem linear convexa via Regressão Logística L2 sobre os embeddings congelados atingiu `86,13%`, superando a cabeça MLP com fine-tuning [`83,48%`] no regime severo de 10 amostras de treino por classe — achado analisado em profundidade na Seção 3.2 do artigo).*
 
 ### Rigor e Validação Estatística
-Para garantir que o ganho de performance não foi obra do acaso, aplicamos testes estatísticos rigorosos:
-* **Significância (Teste de McNemar):** A melhoria de acurácia da Fase 1 para a Fase 2 é estatisticamente significativa ($p < 0.001$).
-* **Confiabilidade (Bootstrap 95%):** Temos 95% de confiança de que a verdadeira acurácia do modelo final no mundo real oscila entre **83,27% e 85,09%**.
-* **Calibração Probabilística:** O modelo "sabe quando não sabe". O Erro de Calibração Esperado (ECE) é baixo ($11,70\%$), o que indica que as probabilidades entregues pelo modelo são confiáveis.
+Para avaliar a significância e a confiabilidade das predições no conjunto de teste ($N = 6.149$):
+* **Significância (Teste de McNemar com correção de Edwards):** O ganho do Fine-Tuning (Fase 2) sobre a Fase 1 (`+1,69 p.p.`, $+104$ acertos líquidos: $b = 411$, $c = 307$) é estatisticamente significativo ($\chi^2 = 14,78$, $p = 1,21 \times 10^{-4}$).
+* **Confiabilidade (Bootstrap 95%):** O intervalo de confiança Bootstrap ($1.000$ reamostragens) para a acurácia Top-1 do modelo Fase 2 no teste é de **`[82,52%, 84,45%]`** (e **`[+0,85 p.p., +2,52 p.p.]`** no Bootstrap pareado para o ganho sobre a Fase 1).
+* **Calibração Probabilística:** O modelo neural apresenta perfil sistemático de subconfiança (*underconfidence*) devido à competição entre $102$ classes e ao *Dropout*, com Erro de Calibração Esperado ($\text{ECE}$) de `$12,11\%$` ($\text{Brier Score} = 0,2596$, $\text{NLL} = 0,7092$).
 
 ---
 
