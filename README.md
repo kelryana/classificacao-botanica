@@ -5,7 +5,7 @@
 [![Torchvision](https://img.shields.io/badge/Torchvision-0.17%2B-red.svg)](https://pytorch.org/vision/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-> **Uma abordagem rigorosa e reprodutível para a Categorização Visual de Grão Fino (*Fine-Grained Visual Categorization — FGVC*), utilizando Transfer Learning (MobileNetV2), validação estatística pareada e calibração probabilística.**
+> **Uma abordagem para a Categorização Visual de Grão Fino (*Fine-Grained Visual Categorization — FGVC*), utilizando Transfer Learning (MobileNetV2), validação estatística pareada e calibração probabilística.**
 
 ---
 
@@ -93,7 +93,7 @@ Para avaliar a significância e a confiabilidade das predições no conjunto de 
 
 ### Opção A: Nuvem via Google Colab (Recomendado)
 A maneira mais fácil e livre de configurações para testar o modelo:
-1. Abra o nosso [Notebook no Google Colab](https://colab.research.google.com/drive/198RGDFIjSfcrm6H8Y6c6zC0U27ZNHwX9?usp=sharing) (ou carregue o arquivo `executar_colab.ipynb`).
+1. Abra o [Notebook no Google Colab](https://colab.research.google.com/drive/1QI191m4VNr9NjK_SkSxPznAc_dPTJOLd?usp=sharing) (ou carregue o arquivo `executar_colab.ipynb`).
 2. Vá em `Ambiente de Execução` > `Alterar tipo de ambiente` e selecione **GPU (T4)**.
 3. Execute as células sequencialmente. O código fará o download do dataset, o treinamento e a geração de gráficos automaticamente.
 
