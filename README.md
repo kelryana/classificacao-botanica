@@ -56,8 +56,8 @@ flowchart LR
 
 Antes de qualquer execução experimental prolongada, o código foi submetido a uma suíte abrangente de testes de software em [`test_pipeline.py`](test_pipeline.py). Todos os 12 testes foram executados e aprovados:
 
-| Módulo / Teste | Propósito da Validação | Resultado |
-| :--- | :--- | :---: |
+| Módulo / Teste | Propósito da Validação 
+| :--- | :--- | 
 | `test_classification_metrics_perfect` | Valida Top-1, Top-5 e F1 com predições perfeitas em subsets de classes | 
 | `test_classification_metrics_imperfect` | Valida cálculo exato de Top-1 e Top-2 com erros controlados | 
 | `test_ece_perfect_calibration` | Confirma que predições perfeitamente calibradas resultam em ECE $\approx 0$ | 
