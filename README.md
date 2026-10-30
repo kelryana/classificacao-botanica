@@ -91,13 +91,14 @@ As versões exatas e compatíveis estão fixadas no arquivo [`requirements.txt`]
 
 ## Como Executar e Reproduzir
 
-### Opção A: Execução no Google Colab Pro com GPU (Recomendado)
-1. Abra o Google Colab Pro.
-2. Carregue o notebook [`executar_colab.ipynb`](executar_colab.ipynb).
-3. Selecione o ambiente de execução com acelerador GPU (ex: T4 GPU).
-4. Execute as células em sequência para instalar dependências, rodar a suíte de testes, executar o pipeline completo e inspecionar as métricas persistidas.
+### Opção A: Link direto do Google Colab para você executar, salvar, fazer um copia ou alterar da sua maneira
 
-### Opção B: Execução Local / Linha de Comando
+1. Acesse o Link [`flores_classificacao`](https://colab.research.google.com/drive/198RGDFIjSfcrm6H8Y6c6zC0U27ZNHwX9?usp=sharing)
+3. OU Carregue o notebook [`executar_colab.ipynb`](executar_colab.ipynb).
+4. Selecione o ambiente de execução com acelerador GPU (ex: T4 GPU).
+5. Execute as células em sequência para instalar dependências, rodar a suíte de testes, executar o pipeline completo e inspecionar as métricas persistidas.
+
+### Opção b: Execução Local / Linha de Comando (Atenção, exige processamento dedicado, faça apenas se for escalável)
 Clone o repositório e crie o ambiente virtual:
 ```bash
 git clone https://github.com/kelryana/classificacao-botanica.git
