@@ -130,7 +130,6 @@ O pipeline gera artefatos estruturados que permitem auditoria completa e indepen
 
 ```text
 classificacao-botanica/
-├── AUDITORIA_METODOLOGICA.md       # Relatório formal de auditoria e discrepâncias
 ├── README.md                       # Documentação técnica e metodológica (este arquivo)
 ├── requirements.txt                # Dependências fixadas e compatíveis
 ├── pipeline_botanico.py            # Pipeline completo de engenharia e modelagem
